@@ -47,6 +47,31 @@ def test_discover_cursor_models_parses_agent_models_output() -> None:
     assert models[1]["baseUrl"] == "cursor://agent"
 
 
+def test_discover_cursor_models_refreshes_stale_fallback_after_login() -> None:
+    from pi_mono.ai import cursor_agent
+
+    completed_fail = CompletedProcess(args=["agent", "models"], returncode=1, stdout="", stderr="")
+    completed_ok = CompletedProcess(
+        args=["agent", "models"],
+        returncode=0,
+        stdout="  auto - Auto\n  composer-2.5-fast - Composer 2.5 Fast\n",
+        stderr="",
+    )
+
+    with patch("pi_mono.ai.cursor_agent.is_cursor_agent_authenticated", return_value=False):
+        with patch("subprocess.run", return_value=completed_fail):
+            stale = discover_cursor_models(refresh=True)
+    assert len(stale) == 20
+
+    cursor_agent._DISCOVERED_MODELS_CACHE = stale
+    cursor_agent._CACHE_FROM_CLI = False
+
+    with patch("pi_mono.ai.cursor_agent.is_cursor_agent_authenticated", return_value=True):
+        with patch("subprocess.run", return_value=completed_ok):
+            refreshed = discover_cursor_models()
+    assert [model["id"] for model in refreshed] == ["auto", "composer-2.5-fast"]
+
+
 @pytest.mark.anyio
 async def test_stream_cursor_launches_and_streams_agent_output() -> None:
     model: Model = {

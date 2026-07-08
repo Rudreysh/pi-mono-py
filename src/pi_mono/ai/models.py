@@ -1,4 +1,3 @@
-from typing import cast
 
 from pi_mono.ai.cursor_agent import discover_cursor_models
 from pi_mono.ai.types import (
@@ -13,7 +12,7 @@ model_registry: dict[str, dict[str, Model]] = {}
 
 # Initialize registry
 for provider, models in MODELS.items():
-    model_registry[provider] = {id: cast(Model, m) for id, m in models.items()}
+    model_registry[provider] = {id: m for id, m in models.items()}
 
 
 def get_model(provider: str, model_id: str) -> Model | None:
@@ -24,12 +23,26 @@ def get_model(provider: str, model_id: str) -> Model | None:
 
 
 def get_providers() -> list[str]:
-    return list(model_registry.keys())
+    providers = list(model_registry.keys())
+    if "cursor" not in providers:
+        providers.append("cursor")
+    return providers
+
+
+def _merge_cursor_models(discovered: list[Model], generated: list[Model]) -> list[Model]:
+    merged = list(discovered)
+    seen = {model["id"] for model in discovered}
+    for model in generated:
+        if model["id"] not in seen:
+            merged.append(model)
+            seen.add(model["id"])
+    return merged
 
 
 def get_models(provider: str) -> list[Model]:
     if provider == "cursor":
-        return discover_cursor_models()
+        generated = list(model_registry.get("cursor", {}).values())
+        return _merge_cursor_models(discover_cursor_models(), generated)
     models = model_registry.get(provider)
     return list(models.values()) if models else []
 

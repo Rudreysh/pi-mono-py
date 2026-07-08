@@ -34,7 +34,7 @@ def _shorten_path(path: str) -> str:
     if not path:
         return path
     if path.startswith(home):
-        return f"~{path[len(home):]}"
+        return f"~{path[len(home) :]}"
     return path
 
 

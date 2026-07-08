@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
 from pi_mono.coding_agent.core.tools.path_utils import path_exists, resolve_to_cwd, to_posix_path
 from pi_mono.coding_agent.core.tools.truncate import DEFAULT_MAX_BYTES, formatSize, truncateHead
+from pi_mono.coding_agent.utils.tools_manager import ensure_tool, get_tool_path
 
 DEFAULT_LIMIT = 1000
 
@@ -38,19 +41,65 @@ class DefaultFindOperations:
         ignore: list[str],
         limit: int,
     ) -> list[str]:
-        results: list[str] = []
-        for root, dirs, files in os.walk(search_cwd):
-            rel_root = os.path.relpath(root, search_cwd)
-            if rel_root == ".":
-                rel_root = ""
-            dirs[:] = [d for d in dirs if d != ".git" and d != "node_modules"]
-            for name in files:
-                rel_path = to_posix_path(os.path.join(rel_root, name)) if rel_root else name
-                if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(name, pattern):
-                    results.append(rel_path)
-                    if len(results) >= limit:
-                        return results
-        return results
+        fd_path = get_tool_path("fd")
+        if fd_path:
+            return await _glob_with_fd(fd_path, pattern, search_cwd, limit=limit)
+        return await _glob_with_walk(pattern, search_cwd, limit=limit)
+
+
+async def _glob_with_fd(
+    fd_path: str,
+    pattern: str,
+    search_cwd: str,
+    *,
+    limit: int,
+) -> list[str]:
+    args = [
+        fd_path,
+        "--glob",
+        "--hidden",
+        "--color=never",
+        "--no-require-git",
+        "--max-results",
+        str(limit),
+    ]
+    effective_pattern = pattern
+    if "/" in pattern:
+        args.append("--full-path")
+        if not pattern.startswith("/") and not pattern.startswith("**/") and pattern != "**":
+            effective_pattern = f"**/{pattern}"
+    args.extend(["--", effective_pattern, search_cwd])
+
+    def run() -> list[str]:
+        completed = subprocess.run(args, capture_output=True, text=True, check=False)
+        if completed.returncode not in (0, 1):
+            raise RuntimeError(completed.stderr.strip() or "fd failed")
+        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        rel_results: list[str] = []
+        for line in lines:
+            rel = os.path.relpath(line, search_cwd)
+            rel_results.append(to_posix_path(rel) if rel != "." else os.path.basename(line))
+            if len(rel_results) >= limit:
+                break
+        return rel_results
+
+    return await asyncio.to_thread(run)
+
+
+async def _glob_with_walk(pattern: str, search_cwd: str, *, limit: int) -> list[str]:
+    results: list[str] = []
+    for root, dirs, files in os.walk(search_cwd):
+        rel_root = os.path.relpath(root, search_cwd)
+        if rel_root == ".":
+            rel_root = ""
+        dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+        for name in files:
+            rel_path = to_posix_path(os.path.join(rel_root, name)) if rel_root else name
+            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(name, pattern):
+                results.append(rel_path)
+                if len(results) >= limit:
+                    return results
+    return results
 
 
 @dataclass
@@ -77,6 +126,7 @@ async def execute_find(
     limit: int | None = None,
     options: FindToolOptions | None = None,
 ) -> AgentToolResult:
+    await ensure_tool("fd", silent=True)
     opts = options or FindToolOptions()
     ops = opts.operations or DefaultFindOperations()
     search_path = resolve_to_cwd(path or ".", cwd)

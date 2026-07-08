@@ -11,6 +11,17 @@ from pi_mono.agent.harness.env.local import LocalExecutionEnv
 from pi_mono.agent.harness.prompt_templates import load_prompt_templates
 from pi_mono.agent.harness.skills import load_skills
 from pi_mono.agent.harness.types import PromptTemplate, Skill
+from pi_mono.coding_agent.core.extensions.loader import (
+    collect_configured_extension_paths,
+    discover_and_load_extensions,
+)
+from pi_mono.coding_agent.core.extensions.types import LoadExtensionsResult
+from pi_mono.coding_agent.core.package_manager import (
+    DefaultPackageManager,
+    _apply_pattern_entries,
+    _collect_files_from_path,
+)
+from pi_mono.coding_agent.core.skills import load_configured_skills, map_skill_path
 from pi_mono.config import CONFIG_DIR_NAME
 from pi_mono.core.settings_manager import SettingsManager
 from pi_mono.utils.paths import resolve_path
@@ -19,19 +30,14 @@ from pi_mono.utils.paths import resolve_path
 ResourceDiagnostic = dict[str, Any]
 
 
-@dataclass
-class LoadExtensionsResult:
-    extensions: list[Any] = field(default_factory=list)
-    errors: list[dict[str, str]] = field(default_factory=list)
-    runtime: dict[str, Any] = field(default_factory=dict)
-
-
 def _empty_extensions_result() -> LoadExtensionsResult:
     return LoadExtensionsResult(
+        extensions=[],
+        errors=[],
         runtime={
             "flagValues": {},
             "pendingProviderRegistrations": [],
-        }
+        },
     )
 
 
@@ -113,8 +119,10 @@ class DefaultResourceLoaderOptions:
     settings_manager: SettingsManager | None = None
     additional_skill_paths: list[str] | None = None
     additional_prompt_template_paths: list[str] | None = None
+    additional_extension_paths: list[str] | None = None
     no_skills: bool = False
     no_prompt_templates: bool = False
+    no_extensions: bool = False
     no_context_files: bool = False
     system_prompt: str | None = None
     append_system_prompt: list[str] | None = None
@@ -131,8 +139,10 @@ class DefaultResourceLoader:
         )
         self._additional_skill_paths = list(options.additional_skill_paths or [])
         self._additional_prompt_paths = list(options.additional_prompt_template_paths or [])
+        self._additional_extension_paths = list(options.additional_extension_paths or [])
         self._no_skills = options.no_skills
         self._no_prompt_templates = options.no_prompt_templates
+        self._no_extensions = options.no_extensions
         self._no_context_files = options.no_context_files
         self._system_prompt_source = options.system_prompt
         self._append_system_prompt_source = options.append_system_prompt
@@ -168,28 +178,38 @@ class DefaultResourceLoader:
         await self._settings_manager.reload()
         env = LocalExecutionEnv(cwd=self._cwd)
 
+        if self._no_extensions:
+            self._extensions_result = _empty_extensions_result()
+        else:
+            extension_paths = await collect_configured_extension_paths(
+                self._cwd,
+                self._agent_dir,
+                self._settings_manager,
+                self._additional_extension_paths,
+            )
+            self._extensions_result = await discover_and_load_extensions(
+                extension_paths,
+                self._cwd,
+                self._agent_dir,
+            )
+
         skill_paths = self._merge_paths(
             (
                 []
                 if self._no_skills
-                else [
-                    os.path.join(self._agent_dir, "skills"),
-                    os.path.join(self._cwd, CONFIG_DIR_NAME, "skills"),
-                ]
+                else await self._resolve_skill_paths()
             ),
             self._additional_skill_paths,
         )
         if skill_paths:
-            skills_result = await load_skills(env, skill_paths)
+            skills_result = await load_configured_skills(
+                cwd=self._cwd,
+                agent_dir=self._agent_dir,
+                skill_paths=skill_paths,
+                include_defaults=False,
+            )
             self._skills = skills_result["skills"]
-            self._skill_diagnostics = [
-                {
-                    "type": diagnostic.type,
-                    "message": diagnostic.message,
-                    "path": diagnostic.path,
-                }
-                for diagnostic in skills_result["diagnostics"]
-            ]
+            self._skill_diagnostics = list(skills_result["diagnostics"])
         else:
             self._skills = []
             self._skill_diagnostics = []
@@ -206,16 +226,30 @@ class DefaultResourceLoader:
             self._additional_prompt_paths,
         )
         if prompt_paths:
-            prompts_result = await load_prompt_templates(env, prompt_paths)
-            self._prompts = prompts_result["prompt_templates"]
-            self._prompt_diagnostics = [
-                {
-                    "type": diagnostic.type,
-                    "message": diagnostic.message,
-                    "path": diagnostic.path,
-                }
-                for diagnostic in prompts_result["diagnostics"]
-            ]
+            all_prompt_files: list[str] = []
+            for path in prompt_paths:
+                all_prompt_files.extend(_collect_files_from_path(path, "prompts"))
+            patterns = self._settings_manager.get_prompt_template_paths()
+            if patterns:
+                enabled_files = sorted(
+                    _apply_pattern_entries(all_prompt_files, patterns, self._agent_dir)
+                )
+            else:
+                enabled_files = sorted(all_prompt_files)
+            if enabled_files:
+                prompts_result = await load_prompt_templates(env, enabled_files)
+                self._prompts = prompts_result["prompt_templates"]
+                self._prompt_diagnostics = [
+                    {
+                        "type": diagnostic.type,
+                        "message": diagnostic.message,
+                        "path": diagnostic.path,
+                    }
+                    for diagnostic in prompts_result["diagnostics"]
+                ]
+            else:
+                self._prompts = []
+                self._prompt_diagnostics = []
         else:
             self._prompts = []
             self._prompt_diagnostics = []
@@ -261,6 +295,21 @@ class DefaultResourceLoader:
             if os.path.exists(candidate):
                 return candidate
         return None
+
+    async def _resolve_skill_paths(self) -> list[str]:
+        package_manager = DefaultPackageManager(
+            cwd=self._cwd,
+            agent_dir=self._agent_dir,
+            settings_manager=self._settings_manager,
+        )
+        resolved = await package_manager.resolve()
+        skill_paths: list[str] = []
+        for resource in resolved["skills"]:
+            if not resource.get("enabled", True):
+                continue
+            metadata = resource.get("metadata", {})
+            skill_paths.append(map_skill_path(resource["path"], metadata))
+        return skill_paths
 
     def _merge_paths(self, primary: list[str], additional: list[str]) -> list[str]:
         merged: list[str] = []

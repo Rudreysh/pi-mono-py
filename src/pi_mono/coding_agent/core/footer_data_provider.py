@@ -56,6 +56,25 @@ def get_cumulative_token_stats(session_manager: Any) -> TokenUsageStats:
     return stats
 
 
+def get_latest_cache_hit_rate(session_manager: Any) -> float | None:
+    """Return cache hit rate from the most recent assistant message with usage."""
+    latest: float | None = None
+    for entry in session_manager.get_entries():
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        if message.get("role") != "assistant":
+            continue
+        usage = message.get("usage") or {}
+        cache_read = int(usage.get("cacheRead") or 0)
+        cache_write = int(usage.get("cacheWrite") or 0)
+        input_tokens = int(usage.get("input") or 0)
+        latest_prompt_tokens = input_tokens + cache_read + cache_write
+        if latest_prompt_tokens > 0:
+            latest = (cache_read / latest_prompt_tokens) * 100
+    return latest
+
+
 class FooterDataProvider:
     """Provides git branch and extension statuses for the footer."""
 
@@ -75,8 +94,8 @@ class FooterDataProvider:
         return self._available_provider_count
 
     def get_token_stats(self, session_manager: Any) -> TokenUsageStats:
-        """Token stats from the last assistant message on the current branch."""
-        return get_last_assistant_usage(session_manager) or TokenUsageStats()
+        """Cumulative token stats from all assistant messages in the session."""
+        return get_cumulative_token_stats(session_manager)
 
     def on_branch_change(self, callback: Any) -> Any:
         self._branch_change_callbacks.append(callback)

@@ -25,12 +25,10 @@ from pi_mono.core.resolve_config_value import (
     get_config_value_env_var_names,
     is_command_config_value,
     is_config_value_configured,
-    is_legacy_env_var_name_config_value,
     resolve_config_value_or_throw,
     resolve_config_value_uncached,
     resolve_headers_or_throw,
 )
-from pi_mono.utils.deprecation import warn_deprecation
 from pi_mono.utils.paths import normalize_path
 from pi_mono.utils.validation import validate_value
 
@@ -268,15 +266,8 @@ def strip_json_comments(input_str: str) -> str:
 def migrate_legacy_register_provider_config_value(
     provider_name: str, field: str, value: str
 ) -> str:
-    if not isinstance(value, str):
-        return value
-    if not is_legacy_env_var_name_config_value(value):
-        return value
-    warn_deprecation(
-        f'registerProvider("{provider_name}") {field} value "{value}" is treated as a legacy environment variable reference. '
-        f'This will no longer be detected as an environment variable reference in a future release. Pass "${value}" instead.'
-    )
-    return f"${value}"
+    del provider_name, field
+    return value
 
 
 def migrate_legacy_register_provider_headers(
@@ -752,6 +743,7 @@ class ModelRegistry:
         try:
             provider = model.get("provider", "")
             provider_config = self.provider_request_configs.get(provider, {})
+            provider_env = self.auth_storage.get_provider_env(provider)
             api_key_from_auth_storage = await self.auth_storage.get_api_key(
                 provider, {"includeFallback": False}
             )
@@ -764,19 +756,20 @@ class ModelRegistry:
                 api_key = "<authenticated>"
             elif provider_api_key is not None:
                 api_key = resolve_config_value_or_throw(
-                    provider_api_key, f'API key for provider "{provider}"'
+                    provider_api_key, f'API key for provider "{provider}"', provider_env
                 )
             else:
                 api_key = None
 
             provider_headers = resolve_headers_or_throw(
-                provider_config.get("headers"), f'provider "{provider}"'
+                provider_config.get("headers"), f'provider "{provider}"', provider_env
             )
             model_headers = resolve_headers_or_throw(
                 self.model_request_headers.get(
                     self.get_model_request_key(provider, model.get("id", ""))
                 ),
                 f'model "{provider}/{model.get("id", "")}"',
+                provider_env,
             )
 
             base_headers = model.get("headers")
@@ -797,6 +790,7 @@ class ModelRegistry:
                 "ok": True,
                 "apiKey": api_key,
                 "headers": headers if len(headers) > 0 else None,
+                "env": provider_env if provider_env else None,
             }
         except Exception as error:
             return {"ok": False, "error": str(error)}

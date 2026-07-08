@@ -36,6 +36,17 @@ async def test_reports_device_code_details_through_on_device_code():
                 "token": "tid=test;exp=9999999999;proxy-ep=proxy.individual.githubcopilot.com;",
                 "expires_at": 9999999999,
             }
+        if url.endswith("/models"):
+            return {
+                "data": [
+                    {
+                        "id": "gpt-4.1",
+                        "model_picker_enabled": True,
+                        "policy": {"state": "enabled"},
+                        "capabilities": {"supports": {"tool_calls": True}},
+                    }
+                ]
+            }
         raise AssertionError(f"Unexpected fetch URL: {url}")
 
     with (

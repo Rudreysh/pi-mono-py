@@ -7,16 +7,22 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from pi_mono.config import VERSION, get_agent_dir
+from pi_mono.config import VERSION, get_agent_dir, get_package_dir
 from pi_mono.coding_agent.cli.args import Args, parse_args, print_help
 from pi_mono.coding_agent.cli.file_processor import process_file_arguments
 from pi_mono.coding_agent.cli.initial_message import InitialMessageInput, build_initial_message
 from pi_mono.coding_agent.cli.list_models import list_models
 from pi_mono.coding_agent.cli.session_picker import select_session
-from pi_mono.coding_agent.core.export_html import export_from_file
+from pi_mono.coding_agent.cli.project_trust import (
+    bootstrap_project_trusted,
+    should_prompt_project_trust_in_interactive,
+)
+from pi_mono.utils.windows_self_update import cleanup_windows_self_update_quarantine
+from pi_mono.core.http_dispatcher import apply_http_proxy_settings
 from pi_mono.coding_agent.core.model_resolver import resolve_cli_model, resolve_model_scope
-from pi_mono.coding_agent.migrations import run_migrations
+from pi_mono.coding_agent.migrations import run_migrations, show_deprecation_warnings
 from pi_mono.coding_agent.core.output_guard import restore_stdout, take_over_stdout
+from pi_mono.coding_agent.core.export_html import export_from_file
 from pi_mono.coding_agent.core.sdk import create_agent_session_runtime
 from pi_mono.coding_agent.modes.interactive.interactive_mode import (
     InteractiveModeOptions,
@@ -292,7 +298,24 @@ async def _create_session_manager(parsed: Args, cwd: str, agent_dir: str) -> Ses
     )
 
 
-async def _create_runtime(parsed: Args, cwd: str, agent_dir: str) -> Any:
+def _resolve_project_trusted_for_runtime(
+    parsed: Args, cwd: str, agent_dir: str, app_mode: str
+) -> bool:
+    if app_mode == "interactive" and should_prompt_project_trust_in_interactive(
+        cwd=cwd,
+        agent_dir=agent_dir,
+        trust_override=parsed.project_trust_override,
+        project_trusted=False,
+    ):
+        return False
+    return bootstrap_project_trusted(
+        cwd=cwd,
+        agent_dir=agent_dir,
+        trust_override=parsed.project_trust_override,
+    )
+
+
+async def _create_runtime(parsed: Args, cwd: str, agent_dir: str, app_mode: str) -> Any:
     no_tools: str | None = None
     if parsed.no_tools:
         no_tools = "all"
@@ -326,20 +349,35 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str) -> Any:
     thinking_level = parsed.thinking
     scoped_models = resolve_model_scope(parsed.models, model_registry) if parsed.models else []
 
-    resolved = resolve_cli_model(
-        cli_provider=parsed.provider,
-        cli_model=parsed.model,
-        model_registry=model_registry,
-    )
-    if resolved.error:
-        print(f"Error: {resolved.error}", file=sys.stderr)
-        raise SystemExit(1)
-    if resolved.warning:
-        print(f"Warning: {resolved.warning}", file=sys.stderr)
-    if resolved.model:
-        model = resolved.model
-        if resolved.thinking_level and thinking_level is None:
-            thinking_level = resolved.thinking_level
+    if parsed.provider and parsed.provider.lower() == "faux":
+        from pi_mono.ai.providers.faux import (
+            DEFAULT_MODEL_ID,
+            faux_assistant_message,
+            register_faux_provider,
+        )
+
+        faux = register_faux_provider({"provider": "faux", "api": "faux"})
+        faux.set_responses([faux_assistant_message("ok")])
+        auth_storage.set_runtime_api_key("faux", "local")
+        model = faux.get_model(parsed.model or DEFAULT_MODEL_ID)
+        if model is None:
+            print("Error: Unknown faux model. Use --model faux-1.", file=sys.stderr)
+            raise SystemExit(1)
+    else:
+        resolved = resolve_cli_model(
+            cli_provider=parsed.provider,
+            cli_model=parsed.model,
+            model_registry=model_registry,
+        )
+        if resolved.error:
+            print(f"Error: {resolved.error}", file=sys.stderr)
+            raise SystemExit(1)
+        if resolved.warning:
+            print(f"Warning: {resolved.warning}", file=sys.stderr)
+        if resolved.model:
+            model = resolved.model
+            if resolved.thinking_level and thinking_level is None:
+                thinking_level = resolved.thinking_level
 
     _validate_fork_flags(parsed)
     _validate_session_id_flags(parsed)
@@ -350,6 +388,10 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str) -> Any:
             print("Error: --name requires a non-empty value", file=sys.stderr)
             raise SystemExit(1)
         session_manager.append_session_info(name)
+
+    project_trusted = _resolve_project_trusted_for_runtime(parsed, cwd, agent_dir, app_mode)
+    settings_manager = SettingsManager.create(cwd, agent_dir, project_trusted=project_trusted)
+    apply_http_proxy_settings(settings_manager.get_http_proxy())
 
     runtime = await create_agent_session_runtime(
         cwd=cwd,
@@ -364,6 +406,9 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str) -> Any:
         resource_loader_options=resource_loader_options or None,
         extension_flag_values=parsed.unknown_flags or None,
         no_extensions=parsed.no_extensions,
+        settings_manager=settings_manager,
+        auth_storage=auth_storage,
+        model_registry=model_registry,
     )
     if runtime.diagnostics:
         _report_diagnostics(runtime.diagnostics)
@@ -382,10 +427,22 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
         if handled:
             return
 
+    if argv and argv[0] == "config":
+        from pi_mono.coding_agent.cli.config_selector import select_config
+
+        cwd = os.getcwd()
+        agent_dir = str(get_agent_dir())
+        settings_manager = SettingsManager.create(cwd, agent_dir, project_trusted=False)
+        await select_config(cwd=cwd, agent_dir=agent_dir, settings_manager=settings_manager)
+        return
+
     offline_mode = "--offline" in argv or _is_truthy_env_flag(os.environ.get("PI_OFFLINE"))
     if offline_mode:
         os.environ["PI_OFFLINE"] = "1"
         os.environ["PI_SKIP_VERSION_CHECK"] = "1"
+
+    if sys.platform == "win32":
+        cleanup_windows_self_update_quarantine(str(get_package_dir()))
 
     parsed = parse_args(argv)
     if parsed.diagnostics:
@@ -427,13 +484,17 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
 
     cwd = os.getcwd()
     agent_dir = str(get_agent_dir())
+    startup_settings = SettingsManager.create(cwd, agent_dir, project_trusted=False)
+    apply_http_proxy_settings(startup_settings.get_http_proxy())
     migration_result = run_migrations(cwd)
-    for warning in migration_result.deprecation_warnings:
-        print(f"Warning: {warning}", file=sys.stderr)
+    if app_mode == "interactive" and migration_result.deprecation_warnings:
+        await show_deprecation_warnings(migration_result.deprecation_warnings)
 
     try:
-        runtime = await _create_runtime(parsed, cwd, agent_dir)
-        stdin_content = await _read_piped_stdin()
+        runtime = await _create_runtime(parsed, cwd, agent_dir, app_mode)
+        stdin_content: str | None = None
+        if app_mode != "rpc":
+            stdin_content = await _read_piped_stdin()
         initial_message, initial_images, follow_up_messages = await _prepare_initial_message(
             parsed,
             cwd=cwd,
@@ -441,6 +502,15 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
         )
 
         if app_mode == "interactive":
+            from pi_mono.coding_agent.cli.startup_ui import (
+                should_run_first_time_setup,
+                show_first_time_setup,
+            )
+
+            if should_run_first_time_setup():
+                setup_result = await show_first_time_setup(startup_settings)
+                if setup_result is None:
+                    return
             await run_interactive_mode(
                 runtime,
                 InteractiveModeOptions(

@@ -252,6 +252,14 @@ class AuthStorage:
     def get(self, provider: str) -> Optional[Dict[str, Any]]:
         return self.data.get(provider)
 
+    def get_provider_env(self, provider: str) -> dict[str, str] | None:
+        cred = self.data.get(provider)
+        if cred and cred.get("type") == "api_key" and cred.get("env"):
+            env = cred.get("env")
+            if isinstance(env, dict):
+                return {str(key): str(value) for key, value in env.items()}
+        return None
+
     def set(self, provider: str, credential: Dict[str, Any]) -> None:
         self.data[provider] = credential
         self._persist_provider_change(provider, credential)
@@ -299,6 +307,11 @@ class AuthStorage:
 
         if provider in self.data:
             if provider == "cursor":
+                if is_cursor_agent_authenticated():
+                    return {"configured": True, "source": "cursor_cli", "label": "agent status"}
+                cred_type = self.data[provider].get("type")
+                if cred_type == "api_key":
+                    return {"configured": True, "source": "stored"}
                 return {"configured": False}
             return {"configured": True, "source": "stored"}
 
@@ -387,7 +400,7 @@ class AuthStorage:
         cred = self.data.get(provider_id)
         if cred:
             if cred.get("type") == "api_key":
-                if provider_id == "cursor":
+                if provider_id == "cursor" and is_cursor_agent_authenticated():
                     return None
                 return resolve_config_value(cred.get("key", ""))
 

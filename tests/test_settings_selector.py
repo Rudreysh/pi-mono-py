@@ -27,6 +27,10 @@ def test_build_settings_items_includes_core_subset():
         "follow-up-mode",
         "thinking",
         "theme",
+        "hide-thinking",
+        "collapse-changelog",
+        "quiet-startup",
+        "tree-filter-mode",
     ]
     assert next(item for item in items if item.id == "autocompact").current_value == "true"
     assert next(item for item in items if item.id == "show-images").current_value == "false"

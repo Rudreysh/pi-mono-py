@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, TypedDict, Union
+from typing import Any, Callable, Literal, TypedDict, Union, cast
 
 from pi_mono.coding_agent.core.extensions.loader import (
     _resolve_extension_entries,
@@ -22,7 +22,13 @@ from pi_mono.coding_agent.core.extensions.loader import (
 from pi_mono.config import CONFIG_DIR_NAME
 from pi_mono.core.settings_manager import PackageSource, SettingsManager
 from pi_mono.utils.git import GitSource, parse_git_url
-from pi_mono.utils.paths import is_local_path, normalize_path, resolve_path
+from pi_mono.utils.paths import (
+    is_local_path,
+    mark_path_ignored_by_cloud_sync,
+    normalize_path,
+    resolve_path,
+)
+from pi_mono.utils.semver import get_npm_version_range, is_exact_npm_version, max_satisfying
 
 SourceScope = Literal["user", "project", "temporary"]
 ResourceType = Literal["extensions", "skills", "prompts", "themes"]
@@ -85,6 +91,8 @@ class NpmSource:
     type: Literal["npm"] = "npm"
     spec: str = ""
     name: str = ""
+    version: str | None = None
+    range: str | None = None
     pinned: bool = False
 
 
@@ -111,17 +119,36 @@ def _create_resource_accumulator() -> dict[ResourceType, dict[str, dict[str, Any
     return {resource_type: {} for resource_type in RESOURCE_TYPES}
 
 
+def _resource_precedence_rank(metadata: PathMetadata) -> int:
+    """Lower rank loads first; first-loaded skill name wins on collision."""
+    if metadata.get("origin") == "package":
+        return 4
+    scope_base = 0 if metadata.get("scope") == "project" else 2
+    return scope_base + (0 if metadata.get("source") == "local" else 1)
+
+
 def _to_resolved_paths(accumulator: dict[ResourceType, dict[str, dict[str, Any]]]) -> ResolvedPaths:
     resolved = _empty_resolved_paths()
     for resource_type in RESOURCE_TYPES:
+        entries: list[dict[str, Any]] = []
         for path, entry in accumulator[resource_type].items():
-            resolved[resource_type].append(
+            entries.append(
                 {
                     "path": path,
                     "enabled": bool(entry.get("enabled", True)),
                     "metadata": entry.get("metadata", {}),
                 }
             )
+        entries.sort(
+            key=lambda item: _resource_precedence_rank(cast(PathMetadata, item["metadata"]))
+        )
+        seen: set[str] = set()
+        for entry in entries:
+            canonical = os.path.realpath(entry["path"])
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            resolved[resource_type].append(entry)
     return resolved
 
 
@@ -250,13 +277,26 @@ def parse_npm_spec(spec: str) -> tuple[str, str | None]:
     return name, version
 
 
+def get_extension_temp_folder(agent_dir: str) -> str:
+    temp_folder = os.path.join(agent_dir, "tmp", "extensions")
+    os.makedirs(temp_folder, mode=0o700, exist_ok=True)
+    os.chmod(temp_folder, 0o700)
+    return temp_folder
+
+
 def parse_source(source: str) -> ParsedSource:
     """Parse a package source string (local paths, npm:, and git URLs)."""
     trimmed = source.strip()
     if trimmed.startswith("npm:"):
         spec = trimmed[len("npm:") :].strip()
         name, version = parse_npm_spec(spec)
-        return NpmSource(spec=spec, name=name, pinned=bool(version))
+        return NpmSource(
+            spec=spec,
+            name=name,
+            version=version,
+            range=get_npm_version_range(version),
+            pinned=is_exact_npm_version(version),
+        )
 
     if trimmed.startswith("file://"):
         path = normalize_path(trimmed, trim=True, expand_tilde=True)
@@ -1023,6 +1063,7 @@ class DefaultPackageManager:
         install_root = self._get_npm_install_root(scope)
         self._ensure_npm_project(install_root)
         await self._run_npm_command(self._get_npm_install_args([source.spec], install_root))
+        mark_path_ignored_by_cloud_sync(install_root)
 
     async def remove_npm(self, source: NpmSource, scope: SourceScope) -> None:
         install_root = self._get_npm_install_root(scope)
@@ -1233,29 +1274,43 @@ class DefaultPackageManager:
         except (OSError, json.JSONDecodeError):
             return None
 
-    async def _get_latest_npm_version(self, package_name: str) -> str:
+    async def _get_latest_npm_version(
+        self, package_spec: str, range_spec: str | None = None
+    ) -> str:
         command, prefix_args = self._get_npm_command()
         output = await self._run_command_capture(
             command,
-            [*prefix_args, "view", package_name, "version", "--json"],
+            [*prefix_args, "view", package_spec, "version", "--json"],
             timeout_ms=NETWORK_TIMEOUT_MS,
         )
+        raw = output.strip()
+        if not raw:
+            raise RuntimeError("Empty response from npm view")
         try:
-            parsed = json.loads(output)
-            if isinstance(parsed, list) and parsed:
-                return str(parsed[-1])
-            return str(parsed)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
-            return output.strip().strip('"')
+            return raw.strip().strip('"')
+        if isinstance(parsed, str):
+            return parsed
+        if isinstance(parsed, list):
+            versions = [str(value) for value in parsed if isinstance(value, str) and value]
+            if range_spec:
+                latest = max_satisfying(versions, range_spec)
+                if latest:
+                    return latest
+            if versions:
+                return sorted(versions, key=lambda version: version)[-1]
+        raise RuntimeError("Unexpected response from npm view")
 
     async def _npm_has_available_update(self, source: NpmSource, installed_path: str) -> bool:
         installed_version = self._get_installed_npm_version(installed_path)
         if not installed_version:
             return False
         try:
-            latest_version = await self._get_latest_npm_version(source.name)
+            package_spec = source.spec if source.version else source.name
+            latest_version = await self._get_latest_npm_version(package_spec, source.range)
         except Exception:
-            return True
+            return False
         return latest_version != installed_version
 
     async def _git_has_available_update(self, installed_path: str) -> bool:

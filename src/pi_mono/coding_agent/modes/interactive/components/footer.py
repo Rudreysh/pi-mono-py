@@ -6,7 +6,11 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
-from pi_mono.coding_agent.core.footer_data_provider import FooterDataProvider
+from pi_mono.coding_agent.core.experimental import are_experimental_features_enabled
+from pi_mono.coding_agent.core.footer_data_provider import (
+    FooterDataProvider,
+    get_latest_cache_hit_rate,
+)
 from pi_mono.coding_agent.modes.interactive.theme.theme import theme
 from pi_mono.tui.utils import truncate_to_width, visible_width
 
@@ -125,8 +129,16 @@ class FooterComponent:
             stats_parts.append(f"R{format_tokens(total_cache_read)}")
         if total_cache_write:
             stats_parts.append(f"W{format_tokens(total_cache_write)}")
-        if total_cost:
-            stats_parts.append(f"${total_cost:.3f}")
+        latest_cache_hit_rate = get_latest_cache_hit_rate(session_manager)
+        if (total_cache_read > 0 or total_cache_write > 0) and latest_cache_hit_rate is not None:
+            stats_parts.append(f"CH{latest_cache_hit_rate:.1f}%")
+        using_subscription = False
+        model_registry = getattr(self._session, "model_registry", None)
+        if model and model_registry is not None and hasattr(model_registry, "is_using_oauth"):
+            using_subscription = bool(model_registry.is_using_oauth(model))
+        if total_cost or using_subscription:
+            cost_str = f"${total_cost:.3f}{' (sub)' if using_subscription else ''}"
+            stats_parts.append(cost_str)
 
         auto_indicator = " (auto)" if self._auto_compact_enabled else ""
         if context_percent == "?":
@@ -144,6 +156,8 @@ class FooterComponent:
         else:
             context_percent_str = context_display
         stats_parts.append(context_percent_str)
+        if are_experimental_features_enabled():
+            stats_parts.append(f"{theme.fg('dim', '•')} {theme.bold(theme.fg('warning', 'xp'))}")
 
         stats_left = " ".join(stats_parts)
         model_name = model.get("id") or "no-model"

@@ -61,6 +61,8 @@ KnownProvider = Literal[
 
 Provider = Union[KnownProvider, str]
 
+ProviderEnv = dict[str, str]
+
 KnownImagesProvider = Literal["openrouter"]
 
 ImagesProvider = Union[KnownImagesProvider, str]

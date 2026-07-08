@@ -1,6 +1,7 @@
 """RPC JSONL mode."""
 
 from pi_mono.coding_agent.modes.rpc.jsonl import serialize_json_line
+from pi_mono.coding_agent.modes.rpc.rpc_client import RpcClient, RpcClientOptions
 from pi_mono.coding_agent.modes.rpc.rpc_mode import (
     RpcMode,
     build_error_response,
@@ -11,6 +12,8 @@ from pi_mono.coding_agent.modes.rpc.rpc_mode import (
 from pi_mono.coding_agent.modes.rpc.rpc_types import RpcCommand, RpcResponse, RpcSessionState
 
 __all__ = [
+    "RpcClient",
+    "RpcClientOptions",
     "RpcCommand",
     "RpcMode",
     "RpcResponse",

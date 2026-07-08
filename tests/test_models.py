@@ -131,3 +131,31 @@ def test_get_image_models():
     models = get_image_models("openrouter")
     assert len(models) > 0
     assert any(m["id"] == "google/gemini-2.5-flash-image" for m in models)
+
+
+def test_get_cursor_models_merges_generated_catalog_with_discovered() -> None:
+    from unittest.mock import patch
+
+    from pi_mono.ai.cursor_agent import refresh_cursor_models_cache
+
+    refresh_cursor_models_cache()
+    discovered = [
+        {
+            "id": "auto",
+            "name": "Auto (CLI)",
+            "api": "openai-completions",
+            "provider": "cursor",
+            "baseUrl": "cursor://agent",
+            "reasoning": False,
+            "input": ["text"],
+            "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0},
+            "contextWindow": 200000,
+            "maxTokens": 32768,
+        }
+    ]
+    with patch("pi_mono.ai.models.discover_cursor_models", return_value=discovered):
+        models = get_models("cursor")
+    ids = [model["id"] for model in models]
+    assert ids[0] == "auto"
+    assert models[0]["name"] == "Auto (CLI)"
+    assert "composer-1" in ids

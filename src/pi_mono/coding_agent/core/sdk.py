@@ -12,6 +12,7 @@ from pi_mono.ai.models import clamp_thinking_level
 from pi_mono.ai.stream import stream_simple
 from pi_mono.ai.types import Context, Model, SimpleStreamOptions
 from pi_mono.config import get_agent_dir
+from pi_mono.utils.abort_signals import AbortSignal
 from pi_mono.core.auth_storage import AuthStorage
 from pi_mono.core.defaults import DEFAULT_THINKING_LEVEL
 from pi_mono.core.messages import convert_to_llm
@@ -38,6 +39,7 @@ from pi_mono.coding_agent.core.resource_loader import (
     DefaultResourceLoaderOptions,
     ResourceLoader,
 )
+from pi_mono.coding_agent.core.extensions.runner import ExtensionRunner
 from pi_mono.coding_agent.core.tools import ToolName
 from pi_mono.utils.paths import resolve_path
 
@@ -200,7 +202,12 @@ async def create_agent_session(
         thinking_level = clamp_thinking_level(model, thinking_level)  # type: ignore[assignment]
 
     default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
-    allowed_tool_names = opts.tools
+    if opts.tools is not None:
+        allowed_tool_names = opts.tools
+    elif opts.no_tools == "all":
+        allowed_tool_names = []
+    else:
+        allowed_tool_names = None
     excluded_tool_names = opts.exclude_tools
     excluded_tool_name_set = set(excluded_tool_names or [])
     if opts.tools is not None:
@@ -236,6 +243,11 @@ async def create_agent_session(
         websocket_connect_timeout_ms = (stream_options or {}).get(
             "websocketConnectTimeoutMs"
         ) or settings_manager.get_websocket_connect_timeout_ms()
+        merged_env = None
+        auth_env = auth.get("env")
+        stream_env = (stream_options or {}).get("env")
+        if auth_env or stream_env:
+            merged_env = {**(auth_env or {}), **(stream_env or {})}
         merged_options: SimpleStreamOptions = {
             **(stream_options or {}),
             "apiKey": auth.get("apiKey"),
@@ -246,10 +258,51 @@ async def create_agent_session(
             "maxRetryDelayMs": (stream_options or {}).get("maxRetryDelayMs")
             or provider_retry_settings.get("maxRetryDelayMs"),
         }
+        if merged_env:
+            merged_options["env"] = merged_env
         headers = auth.get("headers")
         if headers:
             merged_options["headers"] = {**(merged_options.get("headers") or {}), **headers}
+
+        async def on_payload(payload: Any, _model: Model[Any]) -> Any:
+            runner = extension_runner_ref[0]
+            if runner is None or not runner.has_handlers("before_provider_request"):
+                return payload
+            return await runner.emit_before_provider_request(payload)
+
+        async def on_response(response: Any, _model: Model[Any]) -> None:
+            runner = extension_runner_ref[0]
+            if runner is None or not runner.has_handlers("after_provider_response"):
+                return
+            await runner.emit(
+                {
+                    "type": "after_provider_response",
+                    "status": (
+                        getattr(response, "status", None)
+                        if not isinstance(response, dict)
+                        else response.get("status")
+                    ),
+                    "headers": (
+                        getattr(response, "headers", None)
+                        if not isinstance(response, dict)
+                        else response.get("headers")
+                    ),
+                }
+            )
+
+        merged_options["onPayload"] = on_payload
+        merged_options["onResponse"] = on_response
         return stream_simple(selected_model, context, merged_options)
+
+    extension_runner_ref: list[ExtensionRunner | None] = [None]
+
+    async def transform_context(
+        messages: list[AgentMessage], _signal: AbortSignal | None = None
+    ) -> list[AgentMessage]:
+        runner = extension_runner_ref[0]
+        if runner is None:
+            return messages
+        return await runner.emit_context(messages)
 
     agent = Agent(
         {
@@ -261,6 +314,7 @@ async def create_agent_session(
             },
             "convertToLlm": _convert_to_llm_with_block_images(settings_manager),
             "streamFn": stream_fn,
+            "transformContext": transform_context,
             "sessionId": session_manager.get_session_id(),
             "steeringMode": settings_manager.get_steering_mode(),
             "followUpMode": settings_manager.get_follow_up_mode(),
@@ -297,6 +351,7 @@ async def create_agent_session(
             allowed_tool_names=allowed_tool_names,
             excluded_tool_names=excluded_tool_names,
             no_extensions=opts.no_extensions,
+            extension_runner_ref=extension_runner_ref,
         )
     )
 
@@ -349,11 +404,17 @@ async def create_agent_session_runtime(
     resource_loader_options: dict[str, Any] | None = None,
     extension_flag_values: dict[str, bool | str] | None = None,
     no_extensions: bool = False,
+    settings_manager: SettingsManager | None = None,
+    auth_storage: AuthStorage | None = None,
+    model_registry: ModelRegistry | None = None,
 ) -> AgentSessionRuntime:
     services = await create_agent_session_services(
         CreateAgentSessionServicesOptions(
             cwd=cwd,
             agent_dir=agent_dir,
+            settings_manager=settings_manager,
+            auth_storage=auth_storage,
+            model_registry=model_registry,
             resource_loader_options=resource_loader_options,
             extension_flag_values=extension_flag_values,
         )
@@ -375,9 +436,61 @@ async def create_agent_session_runtime(
         )
     )
     await result.session.bind_extensions()
+
+    async def recreate_runtime(
+        *,
+        cwd: str,
+        agent_dir: str,
+        session_manager: SessionManager,
+        session_start_event: dict[str, Any] | None = None,
+    ) -> tuple[AgentSession, Any, list[dict[str, str]], str | None]:
+        next_settings_manager = SettingsManager.create(
+            cwd,
+            agent_dir,
+            project_trusted=services.settings_manager.is_project_trusted(),
+        )
+        next_services = await create_agent_session_services(
+            CreateAgentSessionServicesOptions(
+                cwd=cwd,
+                agent_dir=agent_dir,
+                auth_storage=services.auth_storage,
+                model_registry=services.model_registry,
+                settings_manager=next_settings_manager,
+                resource_loader_options=resource_loader_options,
+                extension_flag_values=extension_flag_values,
+            )
+        )
+        next_result = await create_agent_session_from_services(
+            CreateAgentSessionFromServicesOptions(
+                services=next_services,
+                session_manager=session_manager,
+                model=model,
+                thinking_level=thinking_level,
+                scoped_models=scoped_models,
+                tools=tools,
+                exclude_tools=exclude_tools,
+                no_tools=no_tools,
+                no_extensions=no_extensions,
+            )
+        )
+        next_session = next_result.session
+        if session_start_event:
+            next_session._session_start_reason = session_start_event.get("reason", "startup")
+            next_session._session_start_previous_file = session_start_event.get(
+                "previousSessionFile"
+            )
+        await next_session.bind_extensions()
+        return (
+            next_session,
+            next_services,
+            next_services.diagnostics,
+            next_result.model_fallback_message,
+        )
+
     return AgentSessionRuntime(
         session=result.session,
         services=services,
         diagnostics=services.diagnostics,
         model_fallback_message=result.model_fallback_message,
+        _create_runtime=recreate_runtime,
     )

@@ -176,6 +176,7 @@ class Editor:
         # History
         self._history: List[str] = []
         self._history_index = -1
+        self._history_draft: EditorState | None = None
 
         # Kill ring
         self._kill_ring = KillRing()
@@ -340,6 +341,7 @@ class Editor:
             if self.on_submit:
                 self.on_submit(self.get_text())
             self._history_index = -1
+            self._history_draft = None
             return
 
         if kb.matches(data, "tui.input.tab"):
@@ -354,10 +356,24 @@ class Editor:
             self._move_cursor_right()
             return
         if kb.matches(data, "tui.editor.cursorUp"):
-            self._move_cursor_up()
+            if self._is_on_first_visual_line() and (
+                self._is_editor_empty()
+                or self._history_index > -1
+                or self._state.cursor_col == 0
+            ):
+                self._history_up()
+            elif self._is_on_first_visual_line():
+                self._state.cursor_col = 0
+            else:
+                self._move_cursor_up()
             return
         if kb.matches(data, "tui.editor.cursorDown"):
-            self._move_cursor_down()
+            if self._history_index > -1 and self._is_on_last_visual_line():
+                self._history_down()
+            elif self._is_on_last_visual_line():
+                self._state.cursor_col = len(self._state.lines[self._state.cursor_line])
+            else:
+                self._move_cursor_down()
             return
         if kb.matches(data, "tui.editor.cursorLineStart"):
             self._state.cursor_col = 0
@@ -404,14 +420,6 @@ class Editor:
             return
         if kb.matches(data, "tui.editor.yankPop"):
             self._yank_pop()
-            return
-
-        # History
-        if kb.matches(data, "tui.select.up"):
-            self._history_up()
-            return
-        if kb.matches(data, "tui.select.down"):
-            self._history_down()
             return
 
         # Kitty CSI-u printable
@@ -886,11 +894,35 @@ class Editor:
     # History navigation
     # =========================================================================
 
+    def _is_editor_empty(self) -> bool:
+        return len(self._state.lines) == 1 and self._state.lines[0] == ""
+
+    def _is_on_first_visual_line(self) -> bool:
+        return self._state.cursor_line == 0
+
+    def _is_on_last_visual_line(self) -> bool:
+        return self._state.cursor_line == len(self._state.lines) - 1
+
+    def _copy_editor_state(self) -> EditorState:
+        copied = EditorState()
+        copied.lines = list(self._state.lines)
+        copied.cursor_line = self._state.cursor_line
+        copied.cursor_col = self._state.cursor_col
+        return copied
+
+    def _restore_editor_state(self, state: EditorState) -> None:
+        self._state.lines = list(state.lines)
+        self._state.cursor_line = state.cursor_line
+        self._state.cursor_col = state.cursor_col
+        self._scroll_offset = 0
+        if self.on_change:
+            self.on_change(self.get_text())
+
     def _history_up(self) -> None:
         if not self._history:
             return
         if self._history_index == -1:
-            self._push_undo()
+            self._history_draft = self._copy_editor_state()
         if self._history_index + 1 < len(self._history):
             self._history_index += 1
             self._set_text_internal(self._history[self._history_index])
@@ -898,7 +930,11 @@ class Editor:
     def _history_down(self) -> None:
         if self._history_index <= 0:
             self._history_index = -1
-            self._set_text_internal("")
+            if self._history_draft is not None:
+                self._restore_editor_state(self._history_draft)
+                self._history_draft = None
+            else:
+                self._set_text_internal("")
         else:
             self._history_index -= 1
             self._set_text_internal(self._history[self._history_index])

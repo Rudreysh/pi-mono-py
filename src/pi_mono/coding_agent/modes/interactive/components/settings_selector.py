@@ -9,6 +9,9 @@ from pi_mono.agent.types import AgentThinkingLevel
 from pi_mono.coding_agent.modes.interactive.components.thinking_selector import (
     ThinkingSelectorComponent,
 )
+from pi_mono.coding_agent.modes.interactive.components.show_images_selector import (
+    ShowImagesSelectorComponent,
+)
 from pi_mono.coding_agent.modes.interactive.theme.theme import (
     get_available_themes,
     get_settings_list_theme,
@@ -23,6 +26,7 @@ from pi_mono.tui.tui import Container
 ThinkingLevel = AgentThinkingLevel
 SteeringMode = Literal["all", "one-at-a-time"]
 FollowUpMode = Literal["all", "one-at-a-time"]
+TreeFilterMode = Literal["default", "no-tools", "user-only", "labeled-only", "all"]
 
 
 @dataclass
@@ -35,6 +39,10 @@ class SettingsConfig:
     available_thinking_levels: list[ThinkingLevel]
     current_theme: str
     available_themes: list[str]
+    hide_thinking_block: bool = False
+    collapse_changelog: bool = False
+    quiet_startup: bool = False
+    tree_filter_mode: TreeFilterMode = "default"
 
 
 class SettingsCallbacks(Protocol):
@@ -51,6 +59,14 @@ class SettingsCallbacks(Protocol):
     def on_theme_change(self, theme_name: str) -> None: ...
 
     def on_theme_preview(self, theme_name: str) -> None: ...
+
+    def on_hide_thinking_block_change(self, hidden: bool) -> None: ...
+
+    def on_collapse_changelog_change(self, collapsed: bool) -> None: ...
+
+    def on_quiet_startup_change(self, enabled: bool) -> None: ...
+
+    def on_tree_filter_mode_change(self, mode: TreeFilterMode) -> None: ...
 
     def on_cancel(self) -> None: ...
 
@@ -109,7 +125,6 @@ def build_settings_items(config: SettingsConfig) -> list[SettingItem]:
             label="Show images",
             description="Render images inline in terminal",
             current_value="true" if config.show_images else "false",
-            values=["true", "false"],
         ),
         SettingItem(
             id="steering-mode",
@@ -143,6 +158,34 @@ def build_settings_items(config: SettingsConfig) -> list[SettingItem]:
             description="Color theme for the interface",
             current_value=config.current_theme,
         ),
+        SettingItem(
+            id="hide-thinking",
+            label="Hide thinking blocks",
+            description="Collapse reasoning blocks in assistant messages",
+            current_value="true" if config.hide_thinking_block else "false",
+            values=["true", "false"],
+        ),
+        SettingItem(
+            id="collapse-changelog",
+            label="Collapse changelog",
+            description="Show condensed changelog banner on startup",
+            current_value="true" if config.collapse_changelog else "false",
+            values=["true", "false"],
+        ),
+        SettingItem(
+            id="quiet-startup",
+            label="Quiet startup",
+            description="Suppress non-essential startup messages",
+            current_value="true" if config.quiet_startup else "false",
+            values=["true", "false"],
+        ),
+        SettingItem(
+            id="tree-filter-mode",
+            label="Tree filter mode",
+            description="Default filter for /tree session navigator",
+            current_value=config.tree_filter_mode,
+            values=["default", "no-tools", "user-only", "labeled-only", "all"],
+        ),
     ]
 
 
@@ -153,6 +196,7 @@ def _attach_settings_submenus(
 ) -> None:
     thinking_item = next(item for item in items if item.id == "thinking")
     theme_item = next(item for item in items if item.id == "theme")
+    show_images_item = next(item for item in items if item.id == "show-images")
 
     def thinking_submenu(current_value: str, done: Callable[[str | None], None]) -> Container:
         def on_select(level: ThinkingLevel) -> None:
@@ -187,8 +231,20 @@ def _attach_settings_submenus(
             on_selection_change=callbacks.on_theme_preview,
         )
 
+    def show_images_submenu(current_value: str, done: Callable[[str | None], None]) -> Container:
+        def on_select(enabled: bool) -> None:
+            callbacks.on_show_images_change(enabled)
+            done("true" if enabled else "false")
+
+        return ShowImagesSelectorComponent(
+            current_value=current_value == "true",
+            on_select=on_select,
+            on_cancel=lambda: done(None),
+        )
+
     thinking_item.submenu = thinking_submenu  # type: ignore[assignment]
     theme_item.submenu = theme_submenu  # type: ignore[assignment]
+    show_images_item.submenu = show_images_submenu  # type: ignore[assignment]
 
 
 def handle_settings_change(item_id: str, new_value: str, callbacks: SettingsCallbacks) -> None:
@@ -200,6 +256,14 @@ def handle_settings_change(item_id: str, new_value: str, callbacks: SettingsCall
         callbacks.on_steering_mode_change(new_value)  # type: ignore[arg-type]
     elif item_id == "follow-up-mode":
         callbacks.on_follow_up_mode_change(new_value)  # type: ignore[arg-type]
+    elif item_id == "hide-thinking":
+        callbacks.on_hide_thinking_block_change(new_value == "true")
+    elif item_id == "collapse-changelog":
+        callbacks.on_collapse_changelog_change(new_value == "true")
+    elif item_id == "quiet-startup":
+        callbacks.on_quiet_startup_change(new_value == "true")
+    elif item_id == "tree-filter-mode":
+        callbacks.on_tree_filter_mode_change(new_value)  # type: ignore[arg-type]
 
 
 class SettingsSelectorComponent(Container):
@@ -241,4 +305,8 @@ def build_settings_config_from_session(session: Any) -> SettingsConfig:
         available_thinking_levels=session.get_available_thinking_levels(),
         current_theme=settings_manager.get_theme() or "dark",
         available_themes=get_available_themes(),
+        hide_thinking_block=settings_manager.get_hide_thinking_block(),
+        collapse_changelog=settings_manager.get_collapse_changelog(),
+        quiet_startup=settings_manager.get_quiet_startup(),
+        tree_filter_mode=settings_manager.get_tree_filter_mode(),  # type: ignore[arg-type]
     )

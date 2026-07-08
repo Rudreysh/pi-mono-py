@@ -9,6 +9,8 @@ from typing import Any
 
 from PIL import Image
 
+from pi_mono.utils.exif_orientation import apply_exif_orientation
+
 DEFAULT_MAX_BYTES = int(4.5 * 1024 * 1024)
 
 
@@ -61,7 +63,7 @@ def resize_image(
         with Image.open(io.BytesIO(input_bytes)) as image:
             image.load()
             original_width, original_height = image.size
-            working = image.copy()
+            working = apply_exif_orientation(image.copy())
     except Exception:
         return None
 

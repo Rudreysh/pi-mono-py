@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shutil
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from pi_mono.agent.agent import Agent
-from pi_mono.agent.harness.compaction.compaction import compact, prepare_compaction
+from pi_mono.agent.harness.compaction.compaction import (
+    calculate_context_tokens,
+    compact,
+    estimate_context_tokens,
+    estimate_messages_tokens,
+    prepare_compaction,
+    should_compact,
+)
+from pi_mono.agent.harness.compaction.branch_summarization import (
+    collect_entries_for_branch_summary_sync,
+    generate_branch_summary,
+)
 from pi_mono.agent.harness.messages import create_user_message
 from pi_mono.agent.types import AgentEvent, AgentMessage, AgentTool, ThinkingLevel
 from pi_mono.ai.models import clamp_thinking_level, get_supported_thinking_levels, models_are_equal
 from pi_mono.ai.types import AssistantMessage, ImageContent, Model
 from pi_mono.ai.utils.overflow import is_context_overflow
+from pi_mono.core.session_cwd import assert_session_cwd_exists
 from pi_mono.core.defaults import DEFAULT_THINKING_LEVEL
 from pi_mono.coding_agent.core.bash_executor import (
     BashExecutorOptions,
@@ -24,13 +39,15 @@ from pi_mono.coding_agent.core.bash_executor import (
 from pi_mono.coding_agent.core.tools.bash import LocalBashOperations
 from pi_mono.core.event_bus import EventBusController, create_event_bus
 from pi_mono.core.model_registry import ModelRegistry
-from pi_mono.core.session_manager import SessionManager
+from pi_mono.core.session_manager import SessionManager, get_latest_compaction_entry
 from pi_mono.core.settings_manager import SettingsManager
 from pi_mono.coding_agent.core.auth_guidance import (
     format_no_api_key_found_message,
     format_no_model_selected_message,
 )
 from pi_mono.coding_agent.core.resource_loader import ResourceLoader
+from pi_mono.coding_agent.core.prompt_templates import expand_prompt_template
+from pi_mono.coding_agent.core.skills import expand_skill_command
 from pi_mono.coding_agent.core.system_prompt import build_system_prompt
 from pi_mono.coding_agent.core.extensions import (
     ExtensionActions,
@@ -38,16 +55,35 @@ from pi_mono.coding_agent.core.extensions import (
     ExtensionContextActions,
     ExtensionRunner,
     LoadExtensionsResult,
+    collect_configured_extension_paths,
     discover_and_load_extensions,
+    emit_session_shutdown_event,
 )
 from pi_mono.coding_agent.core.extensions.loader import create_extension_runtime
-from pi_mono.coding_agent.core.extensions.types import ExtensionError
+from pi_mono.coding_agent.core.extensions.types import ContextUsage, ExtensionError
+from pi_mono.agent.types import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+)
 from pi_mono.coding_agent.core.extensions.wrapper import wrap_registered_tools
-from pi_mono.coding_agent.core.tools import ToolName, create_tool
-from pi_mono.config import get_agent_dir  # used by AgentSessionRuntime
+from pi_mono.coding_agent.core.tools import ALL_TOOL_NAMES, ToolName, create_tool
+from pi_mono.config import get_agent_dir
+from pi_mono.utils.paths import resolve_path  # used by AgentSessionRuntime
 from pi_mono.utils.abort_signals import AbortController, AbortSignal
 
-CompactionReason = Literal["manual", "threshold", "overflow"]
+CompactionReason = Literal["manual", "overflow", "threshold"]
+
+_STALE_EXTENSION_CTX_MESSAGE = (
+    "This extension ctx is stale after session replacement or reload. "
+    "Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), "
+    "ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, "
+    "move post-replacement work into withSession and use the ctx passed to withSession. "
+    "For reload, do not use the old ctx after await ctx.reload()."
+)
+
+
 SteeringMode = Literal["all", "one-at-a-time"]
 FollowUpMode = Literal["all", "one-at-a-time"]
 
@@ -139,12 +175,38 @@ AgentSessionEvent = (
 
 AgentSessionEventListener = Callable[[AgentSessionEvent], None]
 
+_SKILL_BLOCK_RE = re.compile(
+    r'^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>(?:\n\n([\s\S]+))?$'
+)
+
+
+class ParsedSkillBlock(TypedDict):
+    name: str
+    location: str
+    content: str
+    userMessage: str | None
+
+
+def parse_skill_block(text: str) -> ParsedSkillBlock | None:
+    match = _SKILL_BLOCK_RE.match(text)
+    if not match:
+        return None
+    user_message = match.group(4)
+    return {
+        "name": match.group(1),
+        "location": match.group(2),
+        "content": match.group(3),
+        "userMessage": user_message.strip() if user_message else None,
+    }
+
 
 @dataclass
 class PromptOptions:
     expand_templates: bool = True
     images: list[ImageContent] | None = None
     streaming_behavior: Literal["steer", "followUp"] | None = None
+    source: Literal["interactive", "rpc", "extension"] = "interactive"
+    preflight_result: Callable[[bool], None] | None = None
 
 
 @dataclass
@@ -162,6 +224,7 @@ class AgentSessionConfig:
     system_prompt: str | None = None
     extension_paths: list[str] | None = None
     no_extensions: bool = False
+    extension_runner_ref: list[ExtensionRunner | None] | None = None
 
 
 def _default_active_tools() -> list[ToolName]:
@@ -175,7 +238,10 @@ def _resolve_tools(
     allowed_tool_names: list[str] | None = None,
     excluded_tool_names: list[str] | None = None,
 ) -> list[AgentTool]:
-    active = initial_active_tool_names or _default_active_tools()
+    if initial_active_tool_names is None:
+        active = _default_active_tools()
+    else:
+        active = list(initial_active_tool_names)
     if allowed_tool_names is not None:
         active = [name for name in active if name in allowed_tool_names]
     if excluded_tool_names:
@@ -197,6 +263,7 @@ class AgentSession:
         self._steering_messages: list[str] = []
         self._follow_up_messages: list[str] = []
         self._compaction_abort_controller: AbortController | None = None
+        self._branch_summary_abort_controller: AbortController | None = None
         self._bash_abort_controller: AbortController | None = None
         self.agent = config.agent
         self.session_manager = config.session_manager
@@ -210,9 +277,26 @@ class AgentSession:
         self._extension_error_unsubscribe: Callable[[], None] | None = None
         self._extension_mode: str = "print"
         self._session_start_reason: str = "startup"
+        self._session_start_previous_file: str | None = None
         self._last_assistant_message: AssistantMessage | None = None
         self._retry_attempt = 0
         self._retry_abort_controller: AbortController | None = None
+        self._overflow_recovery_attempted = False
+        self._auto_compaction_abort_controller: AbortController | None = None
+        self._base_system_prompt = ""
+        self._base_system_prompt_options: dict[str, Any] = {"cwd": config.cwd}
+        self._extension_runner_ref = config.extension_runner_ref
+        self._turn_index = 0
+        self._pending_next_turn_messages: list[AgentMessage] = []
+        self._extension_shutdown_handler: Callable[[], None] | None = None
+        self._extension_abort_handler: Callable[[], None] | None = None
+        self._agent_tool_hooks_installed = False
+        self._allowed_tool_names = (
+            set(config.allowed_tool_names) if config.allowed_tool_names is not None else None
+        )
+        self._excluded_tool_names = set(config.excluded_tool_names or [])
+        self._tool_registry: dict[str, AgentTool] = {}
+        self._tool_prompt_snippets: dict[str, str] = {}
 
         tools = _resolve_tools(
             config.cwd,
@@ -221,6 +305,10 @@ class AgentSession:
             excluded_tool_names=config.excluded_tool_names,
         )
         self.agent.state.tools = tools
+        for tool in tools:
+            self._tool_registry[tool.name] = tool
+            if tool.name in _DEFAULT_TOOL_SNIPPETS:
+                self._tool_prompt_snippets[tool.name] = _DEFAULT_TOOL_SNIPPETS[tool.name]
         self._refresh_system_prompt(custom_prompt=config.system_prompt)
 
         self._agent_listener = self.agent.subscribe(self._handle_agent_event_with_signal)
@@ -245,6 +333,17 @@ class AgentSession:
     def system_prompt(self) -> str:
         return self.agent.state.systemPrompt
 
+    def get_active_tool_names(self) -> list[str]:
+        return [tool.name for tool in self.agent.state.tools]
+
+    def get_all_tools(self) -> list[dict[str, str]]:
+        return [{"name": name} for name in sorted(self._tool_registry.keys())]
+
+    def _is_allowed_tool(self, name: str) -> bool:
+        if self._allowed_tool_names is not None and name not in self._allowed_tool_names:
+            return False
+        return name not in self._excluded_tool_names
+
     @property
     def messages(self) -> list[AgentMessage]:
         return self.agent.state.messages
@@ -255,8 +354,7 @@ class AgentSession:
 
     @property
     def session_file(self) -> str | None:
-        path = getattr(self.session_manager, "session_file", None)
-        return str(path) if path else None
+        return self.session_manager.get_session_file()
 
     @property
     def session_id(self) -> str:
@@ -276,7 +374,11 @@ class AgentSession:
 
     @property
     def is_compacting(self) -> bool:
-        return self._compaction_abort_controller is not None
+        return (
+            self._auto_compaction_abort_controller is not None
+            or self._compaction_abort_controller is not None
+            or self._branch_summary_abort_controller is not None
+        )
 
     @property
     def session_name(self) -> str | None:
@@ -317,22 +419,43 @@ class AgentSession:
             }
         )
 
-    def _handle_agent_event_with_signal(self, event: AgentEvent, _signal: AbortSignal) -> None:
-        self._handle_agent_event(event)
+    async def _handle_agent_event_with_signal(self, event: AgentEvent, _signal: AbortSignal) -> None:
+        await self._handle_agent_event_async(event)
 
-    def _handle_agent_event(self, event: AgentEvent) -> None:
-        event_type = event.get("type")
+    async def _handle_agent_event_async(self, event: AgentEvent) -> None:
+        event_to_emit = event
+        if self._extension_runner is not None:
+            event_to_emit = await self._apply_extension_event_hooks(event)
+
+        event_type = event_to_emit.get("type")
+        if event_type == "message_end":
+            message = event_to_emit.get("message")
+            if message and message.get("role") in ("user", "assistant", "toolResult"):
+                self._persist_message(message)
+                self._remove_delivered_queue_message(message)
+            elif message and message.get("role") == "custom":
+                custom_type = message.get("customType")
+                if custom_type:
+                    append_custom = getattr(
+                        self.session_manager, "append_custom_message_entry", None
+                    )
+                    if callable(append_custom):
+                        append_custom(
+                            custom_type,
+                            message.get("content"),
+                            message.get("display"),
+                            message.get("details"),
+                        )
+
         if event_type == "agent_end":
-            payload = cast(AgentEvent, dict(event))
-            payload["willRetry"] = self._will_retry_after_agent_end(event)  # type: ignore[typeddict-unknown-key]
+            payload = cast(AgentEvent, dict(event_to_emit))
+            payload["willRetry"] = self._will_retry_after_agent_end(event_to_emit)  # type: ignore[typeddict-unknown-key]
             self._emit(payload)  # type: ignore[arg-type]
         else:
-            self._emit(event)
+            self._emit(event_to_emit)  # type: ignore[arg-type]
 
-        if self._extension_runner is not None:
-            asyncio.create_task(self._emit_extension_event(event))
         if event_type == "message_end":
-            message = event.get("message")
+            message = event_to_emit.get("message")
             if message and message.get("role") == "assistant":
                 self._last_assistant_message = cast(AssistantMessage, message)
                 stop_reason = message.get("stopReason")
@@ -346,9 +469,25 @@ class AgentSession:
                         }
                     )
                     self._retry_attempt = 0
-            if message and message.get("role") in ("user", "assistant"):
-                self._persist_message(message)
-                self._remove_delivered_queue_message(message)
+
+    async def _apply_extension_event_hooks(self, event: AgentEvent) -> AgentEvent:
+        runner = self._extension_runner
+        if runner is None:
+            return event
+        await self._emit_extension_event(event)
+        if event.get("type") != "message_end":
+            return event
+        message = event.get("message")
+        if message is None:
+            return event
+        messages = self.agent.state.messages
+        for index, current in enumerate(messages):
+            if current is message or (
+                current.get("timestamp") == message.get("timestamp")
+                and current.get("role") == message.get("role")
+            ):
+                return {**event, "message": messages[index]}
+        return event
 
     def _remove_delivered_queue_message(self, message: AgentMessage) -> None:
         content = message.get("content")
@@ -376,7 +515,7 @@ class AgentSession:
         selected_tool_names = [tool.name for tool in self.agent.state.tools]
         tool_snippets = {
             name: snippet
-            for name, snippet in _DEFAULT_TOOL_SNIPPETS.items()
+            for name, snippet in self._tool_prompt_snippets.items()
             if name in selected_tool_names
         }
         prompt = build_system_prompt(
@@ -388,7 +527,13 @@ class AgentSession:
             context_files=agents_files,
             skills=skills,
         )
+        self._base_system_prompt = prompt
+        self._base_system_prompt_options = {"cwd": self.cwd}
         self.agent.state.systemPrompt = prompt
+
+    @property
+    def prompt_templates(self) -> list[Any]:
+        return self._resource_loader.get_prompts().get("prompts", [])
 
     def set_thinking_level(self, level: ThinkingLevel) -> None:
         effective_level = (
@@ -400,15 +545,48 @@ class AgentSession:
             self.session_manager.append_thinking_level_change(effective_level)
             self.settings_manager.set_default_thinking_level(effective_level)
             self._emit({"type": "thinking_level_changed", "level": effective_level})
+            runner = self._extension_runner
+            if runner is not None:
+                asyncio.create_task(
+                    runner.emit(
+                        {
+                            "type": "thinking_level_select",
+                            "level": effective_level,
+                            "previousLevel": previous_level,
+                        }
+                    )
+                )
+
+    async def _emit_model_select(
+        self,
+        next_model: Model[Any],
+        previous_model: Model[Any] | None,
+        source: Literal["set", "cycle", "restore"],
+    ) -> None:
+        if models_are_equal(previous_model, next_model):
+            return
+        runner = self._extension_runner
+        if runner is None:
+            return
+        await runner.emit(
+            {
+                "type": "model_select",
+                "model": next_model,
+                "previousModel": previous_model,
+                "source": source,
+            }
+        )
 
     async def set_model(self, model: Model[Any]) -> None:
         if not self.model_registry.has_configured_auth(model):
             raise RuntimeError(f"No API key for {model['provider']}/{model['id']}")
-        thinking_level = self.thinking_level
+        previous_model = self.model
+        thinking_level = self._get_thinking_level_for_model_switch()
         self.agent.state.model = model
         self.session_manager.append_model_change(model["provider"], model["id"])
         self.settings_manager.set_default_model_and_provider(model["provider"], model["id"])
         self.set_thinking_level(thinking_level)
+        await self._emit_model_select(model, previous_model, "set")
 
     async def cycle_model(
         self, direction: Literal["forward", "backward"] = "forward"
@@ -453,6 +631,7 @@ class AgentSession:
             next_item["model"]["provider"], next_item["model"]["id"]
         )
         self.set_thinking_level(thinking_level)
+        await self._emit_model_select(next_item["model"], current_model, "cycle")
         return {
             "model": next_item["model"],
             "thinkingLevel": self.thinking_level,
@@ -489,6 +668,7 @@ class AgentSession:
             next_model["provider"], next_model["id"]
         )
         self.set_thinking_level(thinking_level)
+        await self._emit_model_select(next_model, current_model, "cycle")
         return {
             "model": next_model,
             "thinkingLevel": self.thinking_level,
@@ -611,6 +791,17 @@ class AgentSession:
                 return text
         return None
 
+    @property
+    def scoped_models(self) -> list[dict[str, Any]]:
+        return list(self._scoped_models)
+
+    def set_scoped_models(self, scoped_models: list[dict[str, Any]]) -> None:
+        self._scoped_models = list(scoped_models)
+
+    @property
+    def is_bash_running(self) -> bool:
+        return self._bash_abort_controller is not None
+
     async def execute_bash(
         self,
         command: str,
@@ -674,11 +865,29 @@ class AgentSession:
         await self.wait_for_idle()
 
     async def steer(self, text: str, images: list[ImageContent] | None = None) -> None:
+        if text.startswith("/"):
+            self._throw_if_extension_command(text)
+        expanded_text = self._expand_skill_command(text)
+        expanded_text = expand_prompt_template(expanded_text, self.prompt_templates)
+        await self._queue_steer(expanded_text, images)
+
+    async def follow_up(self, text: str, images: list[ImageContent] | None = None) -> None:
+        if text.startswith("/"):
+            self._throw_if_extension_command(text)
+        expanded_text = self._expand_skill_command(text)
+        expanded_text = expand_prompt_template(expanded_text, self.prompt_templates)
+        await self._queue_follow_up(expanded_text, images)
+
+    async def _queue_steer(
+        self, text: str, images: list[ImageContent] | None = None
+    ) -> None:
         self._steering_messages.append(text)
         self._emit_queue_update()
         self.agent.steer(create_user_message(text, images))
 
-    async def follow_up(self, text: str, images: list[ImageContent] | None = None) -> None:
+    async def _queue_follow_up(
+        self, text: str, images: list[ImageContent] | None = None
+    ) -> None:
         self._follow_up_messages.append(text)
         self._emit_queue_update()
         self.agent.followUp(create_user_message(text, images))
@@ -721,30 +930,129 @@ class AgentSession:
         if not target_entry:
             raise RuntimeError(f"Entry {target_id} not found")
 
-        if summarize:
-            raise RuntimeError("Tree summarization is not implemented in the Python scaffold yet")
+        preparation: dict[str, Any] = {
+            "targetId": target_id,
+            "oldLeafId": old_leaf_id,
+            "commonAncestorId": None,
+            "entriesToSummarize": [],
+            "userWantsSummary": summarize,
+            "customInstructions": None,
+            "replaceInstructions": False,
+            "label": None,
+        }
 
-        if (
-            target_entry.get("type") == "message"
-            and target_entry.get("message", {}).get("role") == "user"
-        ):
-            new_leaf_id = target_entry.get("parentId")
-            editor_text = _extract_user_message_text(target_entry.get("message", {}).get("content"))
-        else:
-            new_leaf_id = target_id
-            editor_text = None
+        self._branch_summary_abort_controller = AbortController()
+        try:
+            runner = self._extension_runner
+            if runner is not None and runner.has_handlers("session_before_tree"):
+                before_result = await runner.emit(
+                    {
+                        "type": "session_before_tree",
+                        "preparation": preparation,
+                        "signal": None,
+                    }
+                )
+                if before_result and before_result.get("cancel"):
+                    return {"cancelled": True}
 
-        if new_leaf_id:
-            self.session_manager.branch(new_leaf_id)
-        else:
-            self.session_manager.reset_leaf()
+            if summarize:
+                collected = collect_entries_for_branch_summary_sync(
+                    self.session_manager, old_leaf_id, target_id
+                )
+                entries = collected["entries"]
+                if entries:
+                    model = self.model
+                    if not model:
+                        raise RuntimeError("No model set for branch summary")
+                    auth = await self.model_registry.get_api_key_and_headers(model)
+                    if not auth.get("ok"):
+                        raise RuntimeError(
+                            auth.get("error")
+                            or format_no_api_key_found_message(model.get("provider", ""))
+                        )
+                    branch_summary = await generate_branch_summary(
+                        entries,
+                        {
+                            "model": model,
+                            "apiKey": auth.get("apiKey") or "",
+                            "headers": auth.get("headers"),
+                        },
+                    )
+                    if not branch_summary.ok:
+                        raise RuntimeError(str(branch_summary.error))
 
-        context = self.session_manager.build_session_context()
-        self.agent.state.messages = list(context.get("messages", []))
-        result: dict[str, Any] = {"cancelled": False}
-        if editor_text is not None:
-            result["editorText"] = editor_text
-        return result
+                    if (
+                        target_entry.get("type") == "message"
+                        and target_entry.get("message", {}).get("role") == "user"
+                    ):
+                        new_leaf_id = target_entry.get("parentId")
+                        editor_text = _extract_user_message_text(
+                            target_entry.get("message", {}).get("content")
+                        )
+                    else:
+                        new_leaf_id = target_id
+                        editor_text = None
+
+                    self.session_manager.branch_with_summary(
+                        new_leaf_id,
+                        branch_summary.value["summary"],
+                        {
+                            "readFiles": branch_summary.value["readFiles"],
+                            "modifiedFiles": branch_summary.value["modifiedFiles"],
+                        },
+                    )
+                else:
+                    if (
+                        target_entry.get("type") == "message"
+                        and target_entry.get("message", {}).get("role") == "user"
+                    ):
+                        new_leaf_id = target_entry.get("parentId")
+                        editor_text = _extract_user_message_text(
+                            target_entry.get("message", {}).get("content")
+                        )
+                    else:
+                        new_leaf_id = target_id
+                        editor_text = None
+                    if new_leaf_id:
+                        self.session_manager.branch(new_leaf_id)
+                    else:
+                        self.session_manager.reset_leaf()
+            else:
+                if (
+                    target_entry.get("type") == "message"
+                    and target_entry.get("message", {}).get("role") == "user"
+                ):
+                    new_leaf_id = target_entry.get("parentId")
+                    editor_text = _extract_user_message_text(
+                        target_entry.get("message", {}).get("content")
+                    )
+                else:
+                    new_leaf_id = target_id
+                    editor_text = None
+
+                if new_leaf_id:
+                    self.session_manager.branch(new_leaf_id)
+                else:
+                    self.session_manager.reset_leaf()
+
+            context = self.session_manager.build_session_context()
+            self.agent.state.messages = list(context.get("messages", []))
+
+            if runner is not None and runner.has_handlers("session_tree"):
+                await runner.emit(
+                    {
+                        "type": "session_tree",
+                        "newLeafId": self.session_manager.get_leaf_id(),
+                        "oldLeafId": old_leaf_id,
+                    }
+                )
+
+            result: dict[str, Any] = {"cancelled": False}
+            if editor_text is not None:
+                result["editorText"] = editor_text
+            return result
+        finally:
+            self._branch_summary_abort_controller = None
 
     async def compact(self, custom_instructions: str | None = None) -> dict[str, Any]:
         await self.abort()
@@ -780,29 +1088,89 @@ class AgentSession:
                 aborted = True
                 raise RuntimeError("Compaction cancelled")
 
-            compact_result = await compact(
-                preparation,
-                self.model,
-                auth.get("apiKey") or "",
-                auth.get("headers"),
-                custom_instructions,
-                self._compaction_abort_controller.signal,
-                self.thinking_level,
-            )
-            if not compact_result.ok:
-                raise compact_result.error
+            extension_compaction: dict[str, Any] | None = None
+            from_extension = False
+            runner = self._extension_runner
+            if runner is not None and runner.has_handlers("session_before_compact"):
+                before_result = await runner.emit(
+                    {
+                        "type": "session_before_compact",
+                        "preparation": preparation,
+                        "branchEntries": path_entries,
+                        "customInstructions": custom_instructions,
+                        "signal": self._compaction_abort_controller.signal,
+                    }
+                )
+                if before_result and before_result.get("cancel"):
+                    raise RuntimeError("Compaction cancelled")
+                if before_result and before_result.get("compaction"):
+                    extension_compaction = before_result["compaction"]
+                    from_extension = True
 
-            result = compact_result.value
+            if extension_compaction:
+                summary = str(extension_compaction["summary"])
+                first_kept_entry_id = str(extension_compaction["firstKeptEntryId"])
+                tokens_before = int(extension_compaction["tokensBefore"])
+                details = extension_compaction.get("details")
+            else:
+                compact_result = await compact(
+                    preparation,
+                    self.model,
+                    auth.get("apiKey") or "",
+                    auth.get("headers"),
+                    custom_instructions,
+                    self._compaction_abort_controller.signal,
+                    self.thinking_level,
+                )
+                if not compact_result.ok:
+                    raise compact_result.error
+
+                result = compact_result.value
+                summary = result["summary"]
+                first_kept_entry_id = result["firstKeptEntryId"]
+                tokens_before = result["tokensBefore"]
+                details = result.get("details")
+
+            if self._compaction_abort_controller.signal.aborted:
+                aborted = True
+                raise RuntimeError("Compaction cancelled")
+
             self.session_manager.append_compaction(
-                result["summary"],
-                result["firstKeptEntryId"],
-                result["tokensBefore"],
-                result.get("details"),
-                False,
+                summary,
+                first_kept_entry_id,
+                tokens_before,
+                details,
+                from_extension,
             )
             session_context = self.session_manager.build_session_context()
             self.agent.state.messages = list(session_context.get("messages", []))
-            compaction_result = result
+            estimated_tokens_after = estimate_messages_tokens(self.agent.state.messages)
+            compaction_result = {
+                "summary": summary,
+                "firstKeptEntryId": first_kept_entry_id,
+                "tokensBefore": tokens_before,
+                "estimatedTokensAfter": estimated_tokens_after,
+                "details": details,
+            }
+
+            if runner is not None and runner.has_handlers("session_compact"):
+                saved_compaction = next(
+                    (
+                        entry
+                        for entry in reversed(self.session_manager.get_entries())
+                        if entry.get("type") == "compaction" and entry.get("summary") == summary
+                    ),
+                    None,
+                )
+                if saved_compaction is not None:
+                    await runner.emit(
+                        {
+                            "type": "session_compact",
+                            "compactionEntry": saved_compaction,
+                            "fromExtension": from_extension,
+                        }
+                    )
+
             return compaction_result
         except Exception as error:
             error_message = str(error)
@@ -821,6 +1189,44 @@ class AgentSession:
                 }
             )
             self._compaction_abort_controller = None
+
+    def _expand_skill_command(self, text: str) -> str:
+        skills = self._resource_loader.get_skills().get("skills", [])
+
+        def emit_error(path: str, error: str) -> None:
+            runner = self._extension_runner
+            if runner is None:
+                return
+            runner.emit_error(
+                ExtensionError(
+                    extension_path=path,
+                    event="skill_expansion",
+                    error=error,
+                )
+            )
+
+        return expand_skill_command(text, skills, emit_error=emit_error)
+
+    def _find_last_assistant_message(self) -> AssistantMessage | None:
+        for message in reversed(self.agent.state.messages):
+            if message.get("role") == "assistant":
+                return cast(AssistantMessage, message)
+        return None
+
+    def _throw_if_extension_command(self, text: str) -> None:
+        if not text.startswith("/"):
+            return
+        runner = self._extension_runner
+        if runner is None:
+            return
+        space_index = text.find(" ")
+        command_name = text[1:space_index] if space_index != -1 else text[1:]
+        command = runner.get_command(command_name)
+        if command is not None:
+            raise RuntimeError(
+                f'Extension command "/{command_name}" cannot be queued. '
+                "Use prompt() or execute the command when not streaming."
+            )
 
     async def try_execute_extension_command(self, text: str) -> bool:
         if not text.startswith("/"):
@@ -852,40 +1258,383 @@ class AgentSession:
         if runner is None:
             return
         event_type = event.get("type")
-        if event_type == "message_end":
+        if event_type == "agent_start":
+            self._turn_index = 0
+            await runner.emit({"type": "agent_start"})
+        elif event_type == "agent_end":
+            await runner.emit({"type": "agent_end", "messages": event.get("messages", [])})
+        elif event_type == "turn_start":
+            await runner.emit(
+                {
+                    "type": "turn_start",
+                    "turnIndex": self._turn_index,
+                    "timestamp": int(time.time() * 1000),
+                }
+            )
+        elif event_type == "turn_end":
+            await runner.emit(
+                {
+                    "type": "turn_end",
+                    "turnIndex": self._turn_index,
+                    "message": event.get("message"),
+                    "toolResults": event.get("toolResults", []),
+                }
+            )
+            self._turn_index += 1
+        elif event_type == "message_start":
+            await runner.emit({"type": "message_start", "message": event.get("message")})
+        elif event_type == "message_update":
+            await runner.emit(
+                {
+                    "type": "message_update",
+                    "message": event.get("message"),
+                    "assistantMessageEvent": event.get("assistantMessageEvent"),
+                }
+            )
+        elif event_type == "message_end":
             message = event.get("message")
             if message is not None:
-                await runner.emit_message_end({"type": "message_end", "message": message})
-        elif event_type in ("agent_start", "agent_end", "turn_start", "turn_end"):
-            await runner.emit(event)
+                replacement = await runner.emit_message_end(
+                    {"type": "message_end", "message": message}
+                )
+                if replacement:
+                    self._set_message_in_place(message, replacement)
+        elif event_type == "tool_execution_start":
+            await runner.emit(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": event.get("toolCallId"),
+                    "toolName": event.get("toolName"),
+                    "args": event.get("args"),
+                }
+            )
+        elif event_type == "tool_execution_update":
+            await runner.emit(
+                {
+                    "type": "tool_execution_update",
+                    "toolCallId": event.get("toolCallId"),
+                    "toolName": event.get("toolName"),
+                    "args": event.get("args"),
+                    "partialResult": event.get("partialResult"),
+                }
+            )
+        elif event_type == "tool_execution_end":
+            await runner.emit(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": event.get("toolCallId"),
+                    "toolName": event.get("toolName"),
+                    "result": event.get("result"),
+                    "isError": event.get("isError"),
+                }
+            )
 
-    def _refresh_tool_registry(self) -> None:
+    def _set_message_in_place(self, original: AgentMessage, replacement: AgentMessage) -> None:
+        messages = self.agent.state.messages
+        for index, message in enumerate(messages):
+            if message is original or (
+                message.get("timestamp") == original.get("timestamp")
+                and message.get("role") == original.get("role")
+            ):
+                messages[index] = replacement
+                return
+
+    def _replace_message_in_place(self, original: AgentMessage, replacement: AgentMessage) -> None:
+        self._set_message_in_place(original, replacement)
+        self._emit({"type": "message_update", "message": replacement})
+
+    def _install_agent_tool_hooks(self) -> None:
+        async def before_tool_call(
+            context: BeforeToolCallContext, _signal: AbortSignal | None
+        ) -> BeforeToolCallResult | None:
+            runner = self._extension_runner
+            if runner is None or not runner.has_handlers("tool_call"):
+                return None
+            tool_call = context["toolCall"]
+            try:
+                result = await runner.emit_tool_call(
+                    {
+                        "type": "tool_call",
+                        "toolName": tool_call.get("name"),
+                        "toolCallId": tool_call.get("id"),
+                        "input": context["args"],
+                    }
+                )
+                if result and result.get("block"):
+                    return {
+                        "block": True,
+                        "reason": result.get("reason", "Tool execution was blocked"),
+                    }
+            except Exception as error:
+                raise RuntimeError(f"Extension failed, blocking execution: {error}") from error
+            return None
+
+        async def after_tool_call(
+            context: AfterToolCallContext, _signal: AbortSignal | None
+        ) -> AfterToolCallResult | None:
+            runner = self._extension_runner
+            if runner is None or not runner.has_handlers("tool_result"):
+                return None
+            tool_call = context["toolCall"]
+            result = context["result"]
+            hook_result = await runner.emit_tool_result(
+                {
+                    "type": "tool_result",
+                    "toolName": tool_call.get("name"),
+                    "toolCallId": tool_call.get("id"),
+                    "input": context["args"],
+                    "content": result.get("content"),
+                    "details": result.get("details"),
+                    "isError": context["isError"],
+                }
+            )
+            if not hook_result:
+                return None
+            return {
+                "content": hook_result.get("content", result.get("content")),
+                "details": hook_result.get("details", result.get("details")),
+                "isError": hook_result.get("isError", context["isError"]),
+            }
+
+        self.agent.beforeToolCall = before_tool_call
+        self.agent.afterToolCall = after_tool_call
+        self._agent_tool_hooks_installed = True
+
+    def set_extension_shutdown_handler(self, handler: Callable[[], None] | None) -> None:
+        self._extension_shutdown_handler = handler
+
+    def set_extension_abort_handler(self, handler: Callable[[], None] | None) -> None:
+        self._extension_abort_handler = handler
+
+    def get_context_usage(self) -> ContextUsage | None:
+        model = self.model
+        if not model:
+            return None
+        context_window = int(model.get("contextWindow", 0) or 0)
+        if context_window <= 0:
+            return None
+
+        branch_entries = self.session_manager.get_branch()
+        latest_compaction = get_latest_compaction_entry(branch_entries)
+        if latest_compaction is not None:
+            compaction_index = branch_entries.index(latest_compaction)
+            has_post_compaction_usage = False
+            for entry in reversed(branch_entries[compaction_index + 1 :]):
+                if entry.get("type") != "message":
+                    continue
+                message = entry.get("message", {})
+                if message.get("role") != "assistant":
+                    continue
+                stop_reason = message.get("stopReason")
+                if stop_reason in ("aborted", "error"):
+                    continue
+                usage = message.get("usage")
+                if usage and calculate_context_tokens(usage) > 0:
+                    has_post_compaction_usage = True
+                break
+            if not has_post_compaction_usage:
+                return {"tokens": None, "contextWindow": context_window, "percent": None}
+
+        estimate = estimate_context_tokens(self.agent.state.messages)
+        percent = (estimate.tokens / context_window) * 100
+        return {
+            "tokens": estimate.tokens,
+            "contextWindow": context_window,
+            "percent": percent,
+        }
+
+    async def send_custom_message(
+        self,
+        message: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        opts = options or {}
+        app_message: AgentMessage = {
+            "role": "custom",
+            "customType": message["customType"],
+            "content": message["content"],
+            "display": message.get("display", True),
+            "details": message.get("details"),
+            "timestamp": int(time.time() * 1000),
+        }
+        deliver_as = opts.get("deliverAs")
+        if deliver_as == "nextTurn":
+            self._pending_next_turn_messages.append(app_message)
+            return
+        if self.is_streaming:
+            if deliver_as == "followUp":
+                self.agent.followUp(app_message)
+            else:
+                self.agent.steer(app_message)
+            return
+        if opts.get("triggerTurn"):
+            await self._run_agent_prompt(app_message)
+            return
+        self.agent.state.messages.append(app_message)
+        self.session_manager.append_custom_message_entry(
+            str(message["customType"]),
+            message["content"],
+            bool(message.get("display", True)),
+            message.get("details"),
+        )
+        self._emit({"type": "message_start", "message": app_message})
+        self._emit({"type": "message_end", "message": app_message})
+
+    async def send_user_message(
+        self,
+        content: str | list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        opts = options or {}
+        text: str
+        images: list[ImageContent] | None
+        if isinstance(content, str):
+            text = content
+            images = None
+        else:
+            text_parts: list[str] = []
+            images = []
+            for part in content:
+                if part.get("type") == "text":
+                    text_parts.append(str(part.get("text", "")))
+                elif part.get("type") == "image":
+                    images.append(cast(ImageContent, part))
+            text = "\n".join(text_parts)
+            if not images:
+                images = None
+        await self.prompt(
+            text,
+            PromptOptions(
+                expand_templates=False,
+                images=images,
+                streaming_behavior=opts.get("deliverAs"),
+                source="extension",
+            ),
+        )
+
+    def create_replaced_session_context(self) -> Any:
+        runner = self._extension_runner
+        if runner is None:
+            raise RuntimeError("Extension runner not initialized")
+        base = runner.create_command_context()
+        session = self
+
+        class ReplacedSessionContext:
+            def __init__(self, wrapped: Any) -> None:
+                self._wrapped = wrapped
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+            async def send_user_message(
+                self,
+                content: str | list[dict[str, Any]],
+                options: dict[str, Any] | None = None,
+            ) -> None:
+                await session.send_user_message(content, options)
+
+            async def send_message(
+                self, message: dict[str, Any], options: dict[str, Any] | None = None
+            ) -> None:
+                await session.send_custom_message(message, options)
+
+        return ReplacedSessionContext(base)
+
+    def _extension_runtime_error(self, event: str, error: Exception) -> None:
         runner = self._extension_runner
         if runner is None:
             return
-        active_names = [tool.name for tool in self.agent.state.tools]
-        extension_by_name = {
-            tool.name: tool
-            for tool in wrap_registered_tools(runner.get_all_registered_tools(), runner)
-        }
-        next_tools: list[AgentTool] = []
-        for name in active_names:
-            if name in extension_by_name:
-                next_tools.append(extension_by_name[name])
+        runner.emit_error(
+            ExtensionError(
+                extension_path="<runtime>",
+                event=event,
+                error=str(error),
+            )
+        )
+
+    def _refresh_tool_registry(self) -> None:
+        previous_active = [tool.name for tool in self.agent.state.tools]
+        previous_registry_names = set(self._tool_registry.keys())
+
+        registry: dict[str, AgentTool] = {}
+        snippets: dict[str, str] = dict(_DEFAULT_TOOL_SNIPPETS)
+
+        for name in ALL_TOOL_NAMES:
+            if not self._is_allowed_tool(name):
                 continue
-            try:
-                next_tools.append(create_tool(name, self.cwd))  # type: ignore[arg-type]
-            except (KeyError, ValueError):
-                continue
-        self.agent.state.tools = next_tools
+            registry[name] = create_tool(name, self.cwd)  # type: ignore[arg-type]
+
+        runner = self._extension_runner
+        if runner is not None:
+            registered_tools = [
+                tool
+                for tool in runner.get_all_registered_tools()
+                if self._is_allowed_tool(tool.definition.name)
+            ]
+            for wrapped in wrap_registered_tools(registered_tools, runner):
+                registry[wrapped.name] = wrapped
+            for registered in registered_tools:
+                snippet = registered.definition.prompt_snippet
+                if snippet:
+                    snippets[registered.definition.name] = snippet
+
+        next_active = [name for name in previous_active if name in registry]
+        if self._allowed_tool_names is not None:
+            for name in registry:
+                if name in self._allowed_tool_names and name not in next_active:
+                    next_active.append(name)
+        else:
+            extension_names: set[str] = set()
+            if runner is not None:
+                extension_names = {
+                    registered.definition.name for registered in runner.get_all_registered_tools()
+                }
+            for name in registry:
+                if (
+                    name in extension_names
+                    and name not in previous_registry_names
+                    and name not in next_active
+                ):
+                    next_active.append(name)
+
+        self._tool_registry = registry
+        self._tool_prompt_snippets = snippets
+        self.agent.state.tools = [registry[name] for name in next_active if name in registry]
         self._refresh_system_prompt()
 
     async def export_to_html(
         self, output_path: str | None = None, *, theme_name: str | None = None
     ) -> str:
         from pi_mono.coding_agent.core.export_html.export_html import export_session_to_html
+        from pi_mono.coding_agent.core.export_html.tool_renderer import create_tool_html_renderer
 
-        return export_session_to_html(self, output_path=output_path, theme_name=theme_name)
+        configured_theme = self.settings_manager.get_theme()
+        resolved_theme = theme_name
+        if resolved_theme is None and configured_theme:
+            from pi_mono.coding_agent.modes.interactive.theme.theme import THEMES_DIR
+
+            if (THEMES_DIR / f"{configured_theme}.json").exists():
+                resolved_theme = configured_theme
+
+        tool_renderer = create_tool_html_renderer(
+            cwd=self.session_manager.get_cwd(),
+            get_tool_definition=self._get_tool_definition_for_export,
+        )
+        return export_session_to_html(
+            self,
+            output_path=output_path,
+            theme_name=resolved_theme,
+            tool_renderer=tool_renderer,
+        )
+
+    def _get_tool_definition_for_export(self, name: str) -> Any | None:
+        runner = self._extension_runner
+        if runner is None:
+            return None
+        for registered in runner.get_all_registered_tools():
+            if registered.definition.name == name:
+                return registered.definition
+        return None
 
     def abort_retry(self) -> None:
         if self._retry_abort_controller is not None:
@@ -995,53 +1744,322 @@ class AgentSession:
     async def _handle_post_agent_run(self) -> bool:
         message = self._last_assistant_message
         self._last_assistant_message = None
-        if message is None:
-            return False
+        if message is not None:
+            if self._is_retryable_error(message) and await self._prepare_retry(message):
+                return True
 
-        if self._is_retryable_error(message) and await self._prepare_retry(message):
-            return True
+            if message.get("stopReason") == "error" and self._retry_attempt > 0:
+                self._emit(
+                    {
+                        "type": "auto_retry_end",
+                        "success": False,
+                        "attempt": self._retry_attempt,
+                        "finalError": str(message.get("errorMessage") or "Unknown error"),
+                    }
+                )
+                self._retry_attempt = 0
 
-        if message.get("stopReason") == "error" and self._retry_attempt > 0:
-            self._emit(
-                {
-                    "type": "auto_retry_end",
-                    "success": False,
-                    "attempt": self._retry_attempt,
-                    "finalError": str(message.get("errorMessage") or "Unknown error"),
-                }
-            )
-            self._retry_attempt = 0
+            if await self._check_compaction(cast(AssistantMessage, message)):
+                return True
 
         return self.agent.hasQueuedMessages()
 
+    async def _check_compaction(
+        self, assistant_message: AssistantMessage, *, skip_aborted_check: bool = True
+    ) -> bool:
+        settings = self.settings_manager.get_compaction_settings()
+        if not settings.get("enabled"):
+            return False
+        if skip_aborted_check and assistant_message.get("stopReason") == "aborted":
+            return False
+
+        context_window = int((self.model or {}).get("contextWindow", 0) or 0)
+        same_model = (
+            self.model is not None
+            and assistant_message.get("provider") == self.model.get("provider")
+            and assistant_message.get("model") == self.model.get("id")
+        )
+        compaction_entry = get_latest_compaction_entry(self.session_manager.get_branch())
+        assistant_timestamp = assistant_message.get("timestamp")
+        if compaction_entry is not None and assistant_timestamp is not None:
+            try:
+                compaction_ts = datetime.fromisoformat(
+                    str(compaction_entry.get("timestamp", "")).replace("Z", "+00:00")
+                ).timestamp()
+                if assistant_timestamp <= compaction_ts * 1000:
+                    return False
+            except ValueError:
+                pass
+
+        if same_model and is_context_overflow(assistant_message, context_window):
+            will_retry = assistant_message.get("stopReason") != "stop"
+            if not will_retry:
+                return await self._run_auto_compaction("overflow", False)
+            if self._overflow_recovery_attempted:
+                self._emit(
+                    {
+                        "type": "compaction_end",
+                        "reason": "overflow",
+                        "result": None,
+                        "aborted": False,
+                        "willRetry": False,
+                        "errorMessage": (
+                            "Context overflow recovery failed after one compact-and-retry "
+                            "attempt. Try reducing context or switching to a larger-context model."
+                        ),
+                    }
+                )
+                return False
+            self._overflow_recovery_attempted = True
+            messages = self.agent.state.messages
+            if messages and messages[-1].get("role") == "assistant":
+                self.agent.state.messages = messages[:-1]
+            return await self._run_auto_compaction("overflow", will_retry)
+
+        if assistant_message.get("stopReason") == "error":
+            estimate = estimate_context_tokens(self.agent.state.messages)
+            if estimate.last_usage_index is None:
+                return False
+            usage_msg = self.agent.state.messages[estimate.last_usage_index]
+            if (
+                compaction_entry is not None
+                and usage_msg.get("role") == "assistant"
+                and usage_msg.get("timestamp") is not None
+                and usage_msg.get("timestamp")
+                <= datetime.fromisoformat(
+                    str(compaction_entry.get("timestamp", "")).replace("Z", "+00:00")
+                ).timestamp()
+                * 1000
+            ):
+                return False
+            context_tokens = estimate.tokens
+        else:
+            usage = assistant_message.get("usage")
+            context_tokens = calculate_context_tokens(usage) if usage else 0
+
+        if should_compact(context_tokens, context_window, settings):
+            return await self._run_auto_compaction("threshold", False)
+        return False
+
+    async def _run_auto_compaction(self, reason: CompactionReason, will_retry: bool) -> bool:
+        if not self.model:
+            return False
+        auth = await self.model_registry.get_api_key_and_headers(self.model)
+        if not auth.get("ok") or not auth.get("apiKey"):
+            return False
+
+        path_entries = self.session_manager.get_branch()
+        settings = self.settings_manager.get_compaction_settings()
+        preparation_result = prepare_compaction(path_entries, settings)
+        if not preparation_result.ok or not preparation_result.value:
+            return False
+        preparation = preparation_result.value
+
+        self._emit({"type": "compaction_start", "reason": reason})
+        self._auto_compaction_abort_controller = AbortController()
+        compaction_result: dict[str, Any] | None = None
+        aborted = False
+        error_message: str | None = None
+        try:
+            compact_result = await compact(
+                preparation,
+                self.model,
+                auth.get("apiKey") or "",
+                auth.get("headers"),
+                None,
+                self._auto_compaction_abort_controller.signal,
+                self.thinking_level,
+            )
+            if not compact_result.ok:
+                raise compact_result.error
+            result = compact_result.value
+            self.session_manager.append_compaction(
+                result["summary"],
+                result["firstKeptEntryId"],
+                result["tokensBefore"],
+                result.get("details"),
+                False,
+            )
+            session_context = self.session_manager.build_session_context()
+            self.agent.state.messages = list(session_context.get("messages", []))
+            estimated_tokens_after = estimate_messages_tokens(self.agent.state.messages)
+            compaction_result = {
+                **result,
+                "estimatedTokensAfter": estimated_tokens_after,
+            }
+            return will_retry
+        except Exception as error:
+            error_message = str(error)
+            if "cancelled" in error_message.lower():
+                aborted = True
+            return False
+        finally:
+            self._emit(
+                {
+                    "type": "compaction_end",
+                    "reason": reason,
+                    "result": compaction_result,
+                    "aborted": aborted,
+                    "willRetry": will_retry and compaction_result is not None,
+                    "errorMessage": error_message,
+                }
+            )
+            self._auto_compaction_abort_controller = None
+
     async def _run_agent_prompt(
         self,
-        text: str,
+        input_val: str | AgentMessage | list[AgentMessage],
         *,
         images: list[ImageContent] | None = None,
     ) -> None:
-        await self.agent.prompt(text, images=images)
+        if isinstance(input_val, list):
+            messages = input_val
+        elif isinstance(input_val, dict):
+            messages = [input_val]
+        else:
+            user_content: list[Any] = [{"type": "text", "text": input_val}]
+            if images:
+                user_content.extend(images)
+            messages = [
+                {
+                    "role": "user",
+                    "content": user_content,
+                    "timestamp": int(time.time() * 1000),
+                }
+            ]
+            messages.extend(self._pending_next_turn_messages)
+            self._pending_next_turn_messages = []
+
+        await self.agent.prompt(messages if len(messages) > 1 else messages[0])
         while await self._handle_post_agent_run():
             await self.agent.continue_run()
 
     async def prompt(self, text: str, options: PromptOptions | None = None) -> None:
         opts = options or PromptOptions()
-        if text.startswith("/") and await self.try_execute_extension_command(text):
-            return
-        if not self.model or self.model.get("id") in (None, "unknown"):
-            raise RuntimeError(format_no_model_selected_message())
-        if self.is_streaming:
-            if not opts.streaming_behavior:
-                raise RuntimeError(
-                    "Agent is already processing. Specify streaming_behavior "
-                    "('steer' or 'followUp') to queue the message."
+        preflight_result = opts.preflight_result
+        messages: list[AgentMessage] | None = None
+
+        try:
+            if opts.expand_templates and text.startswith("/"):
+                if await self.try_execute_extension_command(text):
+                    preflight_result and preflight_result(True)
+                    return
+
+            current_text = text
+            current_images = opts.images
+            runner = self._extension_runner
+            if runner is not None and runner.has_handlers("input"):
+                input_result = await runner.emit_input(
+                    current_text,
+                    current_images,
+                    opts.source,
+                    opts.streaming_behavior if self.is_streaming else None,
                 )
-            if opts.streaming_behavior == "followUp":
-                await self.follow_up(text, opts.images)
+                if input_result.get("action") == "handled":
+                    preflight_result and preflight_result(True)
+                    return
+                if input_result.get("action") == "transform":
+                    current_text = input_result.get("text", current_text)
+                    current_images = input_result.get("images", current_images)
+
+            expanded_text = current_text
+            if opts.expand_templates:
+                expanded_text = self._expand_skill_command(expanded_text)
+                expanded_text = expand_prompt_template(expanded_text, self.prompt_templates)
+                if expanded_text.startswith("/") and await self.try_execute_extension_command(
+                    expanded_text
+                ):
+                    preflight_result and preflight_result(True)
+                    return
+
+            if not self.model or self.model.get("id") in (None, "unknown"):
+                raise RuntimeError(format_no_model_selected_message())
+
+            if self.is_streaming:
+                if not opts.streaming_behavior:
+                    raise RuntimeError(
+                        "Agent is already processing. Specify streaming_behavior "
+                        "('steer' or 'followUp') to queue the message."
+                    )
+                if opts.streaming_behavior == "followUp":
+                    await self._queue_follow_up(expanded_text, current_images)
+                else:
+                    await self._queue_steer(expanded_text, current_images)
+                preflight_result and preflight_result(True)
+                return
+
+            if not self.model_registry.has_configured_auth(self.model):
+                provider = self.model.get("provider", "unknown")
+                if self.model_registry.is_using_oauth(self.model):
+                    raise RuntimeError(
+                        f'Authentication failed for "{provider}". '
+                        "Credentials may have expired or network is unavailable. "
+                        f"Run '/login {provider}' to re-authenticate."
+                    )
+                raise RuntimeError(format_no_api_key_found_message(provider))
+
+            last_assistant = self._find_last_assistant_message()
+            if last_assistant and await self._check_compaction(
+                last_assistant, skip_aborted_check=False
+            ):
+                try:
+                    await self.agent.continue_run()
+                    while await self._handle_post_agent_run():
+                        await self.agent.continue_run()
+                finally:
+                    pass
+
+            user_content: list[Any] = [{"type": "text", "text": expanded_text}]
+            if current_images:
+                user_content.extend(current_images)
+            messages = [
+                {
+                    "role": "user",
+                    "content": user_content,
+                    "timestamp": int(time.time() * 1000),
+                }
+            ]
+            messages.extend(self._pending_next_turn_messages)
+            self._pending_next_turn_messages = []
+
+            if runner is not None:
+                hook_result = await runner.emit_before_agent_start(
+                    expanded_text,
+                    current_images,
+                    self._base_system_prompt,
+                    self._base_system_prompt_options,
+                )
+                if hook_result:
+                    for msg in hook_result.get("messages") or []:
+                        messages.append(
+                            {
+                                "role": "custom",
+                                "customType": msg["customType"],
+                                "content": msg["content"],
+                                "display": msg.get("display", True),
+                                "details": msg.get("details"),
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        )
+                    if hook_result.get("systemPrompt") is not None:
+                        self.agent.state.systemPrompt = hook_result["systemPrompt"]
+                    else:
+                        self.agent.state.systemPrompt = self._base_system_prompt
+                else:
+                    self.agent.state.systemPrompt = self._base_system_prompt
             else:
-                await self.steer(text, opts.images)
+                self.agent.state.systemPrompt = self._base_system_prompt
+        except Exception:
+            if preflight_result is not None:
+                preflight_result(False)
+            raise
+
+        if messages is None:
             return
-        await self._run_agent_prompt(text, images=opts.images)
+
+        if preflight_result is not None:
+            preflight_result(True)
+        await self._run_agent_prompt(messages)
 
     @property
     def extension_runner(self) -> ExtensionRunner | None:
@@ -1057,11 +2075,34 @@ class AgentSession:
                 extensions=[], errors=[], runtime=runtime
             )
         else:
-            self._extension_load_result = await discover_and_load_extensions(
-                self._extension_paths,
-                self.cwd,
-                str(get_agent_dir()),
-            )
+            if self._extension_paths:
+                extension_paths = await collect_configured_extension_paths(
+                    self.cwd,
+                    str(get_agent_dir()),
+                    self.settings_manager,
+                    self._extension_paths,
+                )
+                self._extension_load_result = await discover_and_load_extensions(
+                    extension_paths,
+                    self.cwd,
+                    str(get_agent_dir()),
+                )
+            else:
+                self._extension_load_result = self._resource_loader.get_extensions()
+                if (
+                    not self._extension_load_result.extensions
+                    and not self._extension_load_result.errors
+                ):
+                    extension_paths = await collect_configured_extension_paths(
+                        self.cwd,
+                        str(get_agent_dir()),
+                        self.settings_manager,
+                    )
+                    self._extension_load_result = await discover_and_load_extensions(
+                        extension_paths,
+                        self.cwd,
+                        str(get_agent_dir()),
+                    )
 
         load_result = self._extension_load_result
         self._extension_runner = ExtensionRunner(
@@ -1071,14 +2112,18 @@ class AgentSession:
             self.session_manager,
             self.model_registry,
         )
+        if self._extension_runner_ref is not None:
+            self._extension_runner_ref[0] = self._extension_runner
         return self._extension_runner
 
     def _build_extension_actions(self) -> ExtensionActions:
         def get_active_tools() -> list[str]:
-            return [tool.name for tool in self.agent.state.tools]
+            return self.get_active_tool_names()
 
         def set_active_tools(tool_names: list[str]) -> None:
-            self.agent.state.tools = _resolve_tools(self.cwd, initial_active_tool_names=tool_names)
+            registry = self._tool_registry
+            self.agent.state.tools = [registry[name] for name in tool_names if name in registry]
+            self._refresh_system_prompt()
 
         def refresh_tools() -> None:
             self._refresh_tool_registry()
@@ -1097,14 +2142,22 @@ class AgentSession:
             ]
 
         return ExtensionActions(
-            send_message=lambda *_a, **_k: None,
-            send_user_message=lambda *_a, **_k: None,
-            append_entry=lambda *_a, **_k: None,
+            send_message=lambda message, options=None: asyncio.create_task(
+                self._send_custom_message_safe(message, options)
+            ),
+            send_user_message=lambda content, options=None: asyncio.create_task(
+                self._send_user_message_safe(content, options)
+            ),
+            append_entry=lambda custom_type, data=None: self.session_manager.append_custom_entry(
+                custom_type, data
+            ),
             set_session_name=self.set_session_name,
             get_session_name=lambda: self.session_manager.get_session_name(),
-            set_label=lambda *_a, **_k: None,
+            set_label=lambda entry_id, label: self.session_manager.append_label_change(
+                entry_id, label
+            ),
             get_active_tools=get_active_tools,
-            get_all_tools=lambda: [tool.name for tool in self.agent.state.tools],
+            get_all_tools=lambda: [tool["name"] for tool in self.get_all_tools()],
             set_active_tools=set_active_tools,
             refresh_tools=refresh_tools,
             get_commands=get_commands,
@@ -1113,22 +2166,62 @@ class AgentSession:
             set_thinking_level=self.set_thinking_level,
         )
 
+    async def _send_custom_message_safe(
+        self, message: dict[str, Any], options: dict[str, Any] | None
+    ) -> None:
+        try:
+            await self.send_custom_message(message, options)
+        except Exception as error:
+            self._extension_runtime_error("send_message", error)
+
+    async def _send_user_message_safe(
+        self, content: str | list[dict[str, Any]], options: dict[str, Any] | None
+    ) -> None:
+        try:
+            await self.send_user_message(content, options)
+        except Exception as error:
+            self._extension_runtime_error("send_user_message", error)
+
     async def _set_model_from_extension(self, model: Model[Any]) -> bool:
         await self.set_model(model)
         return True
 
     def _build_extension_context_actions(self) -> ExtensionContextActions:
+        def compact(options: Any = None) -> None:
+            opts = options or {}
+
+            async def run_compact() -> None:
+                try:
+                    result = await self.compact(opts.get("customInstructions"))
+                    on_complete = opts.get("onComplete")
+                    if callable(on_complete):
+                        on_complete(result)
+                except Exception as error:
+                    on_error = opts.get("onError")
+                    if callable(on_error):
+                        on_error(error)
+
+            asyncio.create_task(run_compact())
+
+        def abort() -> None:
+            if self._extension_abort_handler is not None:
+                self._extension_abort_handler()
+                return
+            asyncio.create_task(self.abort())
+
         return ExtensionContextActions(
             get_model=lambda: self.model,
             is_idle=lambda: not self.is_streaming,
-            get_signal=lambda: None,
-            abort=lambda: None,
+            get_signal=lambda: self.agent.signal,
+            abort=abort,
             has_pending_messages=lambda: self.pending_message_count > 0,
-            shutdown=lambda: None,
-            get_context_usage=lambda: None,
-            compact=lambda *_a: None,
+            shutdown=lambda: (
+                self._extension_shutdown_handler() if self._extension_shutdown_handler else None
+            ),
+            get_context_usage=self.get_context_usage,
+            compact=compact,
             get_system_prompt=lambda: self.system_prompt,
-            get_system_prompt_options=lambda: {"cwd": self.cwd},
+            get_system_prompt_options=lambda: self._base_system_prompt_options,
         )
 
     async def bind_extensions(self, **kwargs: Any) -> None:
@@ -1136,8 +2229,15 @@ class AgentSession:
         ui_context = kwargs.get("ui_context")
         command_context_actions = kwargs.get("command_context_actions")
         on_error = kwargs.get("on_error")
+        shutdown_handler = kwargs.get("shutdown_handler")
+        abort_handler = kwargs.get("abort_handler")
         extension_paths = kwargs.get("extension_paths")
         no_extensions = kwargs.get("no_extensions")
+
+        if shutdown_handler is not None:
+            self.set_extension_shutdown_handler(shutdown_handler)
+        if abort_handler is not None:
+            self.set_extension_abort_handler(abort_handler)
 
         if extension_paths is not None:
             self._extension_paths = list(extension_paths)
@@ -1145,6 +2245,8 @@ class AgentSession:
             self._no_extensions = bool(no_extensions)
 
         runner = await self._ensure_extension_runner()
+        if not self._agent_tool_hooks_installed:
+            self._install_agent_tool_hooks()
         runner.bind_core(self._build_extension_actions(), self._build_extension_context_actions())
         runner.set_ui_context(ui_context, mode)
         self._extension_mode = mode
@@ -1178,24 +2280,58 @@ class AgentSession:
         if on_error is not None:
             self._extension_error_unsubscribe = runner.on_error(on_error)
 
+        session_start_event: dict[str, Any] = {
+            "type": "session_start",
+            "reason": self._session_start_reason,
+        }
+        if self._session_start_previous_file:
+            session_start_event["previousSessionFile"] = self._session_start_previous_file
+        await runner.emit(session_start_event)
         self._refresh_tool_registry()
-        await runner.emit(
-            {
-                "type": "session_start",
-                "reason": self._session_start_reason,
-            }
-        )
         await runner.emit_resources_discover(self.cwd, "startup")
 
     async def reload(self) -> None:
+        runner = self._extension_runner
+        if runner is not None:
+            await emit_session_shutdown_event(
+                runner, {"type": "session_shutdown", "reason": "reload"}
+            )
         await self._resource_loader.reload()
         self._refresh_system_prompt()
         context = self.session_manager.build_session_context()
         self.agent.state.messages = list(context.get("messages", []))
 
+    def dispose_for_replacement(self) -> None:
+        if self._disposed:
+            return
+        try:
+            self.abort_retry()
+            if self._compaction_abort_controller is not None:
+                self._compaction_abort_controller.abort()
+            self.agent.abort()
+        except Exception:
+            pass
+        runner = self._extension_runner
+        if runner is not None:
+            runner.invalidate(_STALE_EXTENSION_CTX_MESSAGE)
+        if self._extension_error_unsubscribe is not None:
+            self._extension_error_unsubscribe()
+            self._extension_error_unsubscribe = None
+        if self._agent_listener is not None:
+            self._agent_listener()
+            self._agent_listener = None
+        self._listeners.clear()
+        self._event_bus.clear()
+        self._disposed = True
+
     def dispose(self) -> None:
         if self._disposed:
             return
+        runner = self._extension_runner
+        if runner is not None:
+            asyncio.create_task(
+                emit_session_shutdown_event(runner, {"type": "session_shutdown", "reason": "quit"})
+            )
         self._disposed = True
         if self._extension_error_unsubscribe is not None:
             self._extension_error_unsubscribe()
@@ -1238,6 +2374,12 @@ CreateAgentSessionRuntimeFactory = Callable[
 ]
 
 
+class SessionImportFileNotFoundError(FileNotFoundError):
+    def __init__(self, path: str) -> None:
+        super().__init__(f"Session import file not found: {path}")
+        self.path = path
+
+
 @dataclass
 class AgentSessionRuntime:
     session: AgentSession
@@ -1246,28 +2388,72 @@ class AgentSessionRuntime:
     model_fallback_message: str | None = None
     _create_runtime: CreateAgentSessionRuntimeFactory | None = None
     _rebind_session: Callable[[], Awaitable[None]] | None = None
+    _before_session_invalidate: Callable[[], None] | None = None
 
     def set_rebind_session(self, handler: Callable[[], Awaitable[None]]) -> None:
         self._rebind_session = handler
 
+    def set_before_session_invalidate(self, handler: Callable[[], None] | None) -> None:
+        self._before_session_invalidate = handler
+
     async def dispose(self) -> None:
         self.session.dispose()
 
-    async def _finish_replacement(self) -> None:
-        if self._rebind_session is not None:
-            await self._rebind_session()
+    async def _emit_before_switch(
+        self, reason: Literal["new", "resume"], target_session_file: str | None = None
+    ) -> bool:
+        runner = getattr(self.session, "extension_runner", None)
+        if runner is None or not runner.has_handlers("session_before_switch"):
+            return False
+        result = await runner.emit(
+            {
+                "type": "session_before_switch",
+                "reason": reason,
+                "targetSessionFile": target_session_file,
+            }
+        )
+        return bool(result and result.get("cancel"))
 
-    async def _replace_session(
+    async def _emit_before_fork(self, entry_id: str, position: Literal["before", "at"]) -> bool:
+        runner = getattr(self.session, "extension_runner", None)
+        if runner is None or not runner.has_handlers("session_before_fork"):
+            return False
+        result = await runner.emit(
+            {
+                "type": "session_before_fork",
+                "entryId": entry_id,
+                "position": position,
+            }
+        )
+        return bool(result and result.get("cancel"))
+
+    async def _teardown_current(
+        self, reason: Literal["new", "resume", "fork"], target_session_file: str | None = None
+    ) -> None:
+        runner = getattr(self.session, "extension_runner", None)
+        if runner is not None:
+            shutdown_event: dict[str, Any] = {
+                "type": "session_shutdown",
+                "reason": reason,
+            }
+            if target_session_file:
+                shutdown_event["targetSessionFile"] = target_session_file
+            await emit_session_shutdown_event(runner, shutdown_event)  # type: ignore[arg-type]
+        if self._before_session_invalidate is not None:
+            self._before_session_invalidate()
+        dispose_for_replacement = getattr(self.session, "dispose_for_replacement", None)
+        if dispose_for_replacement is not None:
+            dispose_for_replacement()
+
+    async def _apply_runtime(
         self,
         session_manager: SessionManager,
         *,
         reason: str,
-        previous_session_file: str | None = None,
+        previous_session_file: str | None,
     ) -> None:
         if self._create_runtime is not None:
-            services = self.services
-            agent_dir = getattr(services, "agent_dir", None) or str(get_agent_dir())
-            self.session.dispose()
+            agent_dir = getattr(self.services, "agent_dir", None) or str(get_agent_dir())
             session, services, diagnostics, model_fallback_message = await self._create_runtime(
                 cwd=session_manager.get_cwd(),
                 agent_dir=agent_dir,
@@ -1282,27 +2468,46 @@ class AgentSessionRuntime:
             self.services = services
             self.diagnostics = diagnostics
             self.model_fallback_message = model_fallback_message
-            self.session._session_start_reason = reason
         else:
-            self.session.session_manager = session_manager
             self.session._session_start_reason = reason
+            self.session._session_start_previous_file = previous_session_file
+            self.session.session_manager = session_manager
+            self.session._disposed = False
             await self.session.reload()
 
+    async def _finish_replacement(
+        self, with_session: Callable[[Any], Awaitable[None]] | None = None
+    ) -> None:
+        if self._rebind_session is not None:
+            result = self._rebind_session()
+            if hasattr(result, "__await__"):
+                await result
+        if with_session is not None:
+            await with_session(self.session.create_replaced_session_context())
+
     async def new_session(self, options: dict[str, Any] | None = None) -> dict[str, bool]:
+        if await self._emit_before_switch("new"):
+            return {"cancelled": True}
+
+        opts = options or {}
+        with_session = opts.get("withSession") or opts.get("with_session")
+
         previous_session_file = self.session.session_file
         session_dir = self.session.session_manager.get_session_dir()
-        if session_dir:
+        if self.session.session_manager.is_persisted():
             session_manager = SessionManager.create(self.session.cwd, session_dir)
         else:
             session_manager = SessionManager.in_memory(self.session.cwd)
-        if options and options.get("parentSession"):
-            session_manager.new_session({"parentSession": options["parentSession"]})
-        await self._replace_session(
+        if opts.get("parentSession"):
+            session_manager.new_session({"parentSession": opts["parentSession"]})
+
+        await self._teardown_current("new", session_manager.get_session_file())
+        await self._apply_runtime(
             session_manager,
             reason="new",
             previous_session_file=previous_session_file,
         )
-        await self._finish_replacement()
+        await self._finish_replacement(with_session)
         return {"cancelled": False}
 
     async def fork(
@@ -1310,7 +2515,12 @@ class AgentSessionRuntime:
         entry_id: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        position = (options or {}).get("position", "before")
+        opts = options or {}
+        with_session = opts.get("withSession") or opts.get("with_session")
+        position = opts.get("position", "before")
+        if await self._emit_before_fork(entry_id, position):
+            return {"cancelled": True}
+
         selected_entry = self.session.session_manager.get_entry(entry_id)
         if not selected_entry:
             raise RuntimeError("Invalid entry ID for forking")
@@ -1340,7 +2550,8 @@ class AgentSessionRuntime:
             if not target_leaf_id:
                 new_session_manager = SessionManager.create(self.session.cwd, session_dir)
                 new_session_manager.new_session({"parentSession": current_session_file})
-                await self._replace_session(
+                await self._teardown_current("fork", new_session_manager.get_session_file())
+                await self._apply_runtime(
                     new_session_manager,
                     reason="fork",
                     previous_session_file=previous_session_file,
@@ -1350,7 +2561,8 @@ class AgentSessionRuntime:
                 forked_session_path = branched_manager.create_branched_session(str(target_leaf_id))
                 if not forked_session_path:
                     raise RuntimeError("Failed to create forked session")
-                await self._replace_session(
+                await self._teardown_current("fork", branched_manager.get_session_file())
+                await self._apply_runtime(
                     branched_manager,
                     reason="fork",
                     previous_session_file=previous_session_file,
@@ -1360,13 +2572,14 @@ class AgentSessionRuntime:
                 session_manager.new_session({"parentSession": self.session.session_file})
             else:
                 session_manager.create_branched_session(str(target_leaf_id))
-            await self._replace_session(
+            await self._teardown_current("fork", session_manager.get_session_file())
+            await self._apply_runtime(
                 session_manager,
                 reason="fork",
                 previous_session_file=previous_session_file,
             )
 
-        await self._finish_replacement()
+        await self._finish_replacement(with_session)
         return {"cancelled": False, "selectedText": selected_text}
 
     async def switch_session(
@@ -1374,10 +2587,52 @@ class AgentSessionRuntime:
         session_path: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, bool]:
+        opts = options or {}
+        with_session = opts.get("withSession") or opts.get("with_session")
+        resolved_path = resolve_path(session_path)
+        if await self._emit_before_switch("resume", resolved_path):
+            return {"cancelled": True}
+
         previous_session_file = self.session.session_file
-        cwd_override = (options or {}).get("cwdOverride") if options else None
-        session_manager = SessionManager.open(session_path, None, cwd_override)
-        await self._replace_session(
+        cwd_override = opts.get("cwdOverride")
+        session_manager = SessionManager.open(resolved_path, None, cwd_override)
+        assert_session_cwd_exists(session_manager, self.session.cwd)
+        await self._teardown_current("resume", session_manager.get_session_file())
+        await self._apply_runtime(
+            session_manager,
+            reason="resume",
+            previous_session_file=previous_session_file,
+        )
+        await self._finish_replacement(with_session)
+        return {"cancelled": False}
+
+    async def import_from_jsonl(
+        self,
+        input_path: str,
+        cwd_override: str | None = None,
+    ) -> dict[str, bool]:
+        resolved_path = resolve_path(input_path)
+        if not os.path.exists(resolved_path):
+            raise SessionImportFileNotFoundError(resolved_path)
+
+        session_dir = self.session.session_manager.get_session_dir()
+        if session_dir:
+            os.makedirs(session_dir, exist_ok=True)
+
+        destination_path = os.path.join(session_dir or "", os.path.basename(resolved_path))
+        if await self._emit_before_switch("resume", destination_path):
+            return {"cancelled": True}
+
+        previous_session_file = self.session.session_file
+        if os.path.abspath(destination_path) != os.path.abspath(resolved_path):
+            shutil.copy2(resolved_path, destination_path)
+        else:
+            destination_path = resolved_path
+
+        session_manager = SessionManager.open(destination_path, session_dir, cwd_override)
+        assert_session_cwd_exists(session_manager, self.session.cwd)
+        await self._teardown_current("resume", session_manager.get_session_file())
+        await self._apply_runtime(
             session_manager,
             reason="resume",
             previous_session_file=previous_session_file,

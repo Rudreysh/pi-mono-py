@@ -107,7 +107,9 @@ def parse_config_value_reference(config: str) -> ConfigValueReference:
     return {"type": "template", "parts": parse_config_value_template(config)}
 
 
-def resolve_env_config_value(name: str) -> str | None:
+def resolve_env_config_value(name: str, env: dict[str, str] | None = None) -> str | None:
+    if env and name in env:
+        return env[name]
     return os.environ.get(name)
 
 
@@ -119,13 +121,13 @@ def get_template_env_var_names(parts: list[TemplatePart]) -> list[str]:
     return names
 
 
-def resolve_template(parts: list[TemplatePart]) -> str | None:
+def resolve_template(parts: list[TemplatePart], env: dict[str, str] | None = None) -> str | None:
     resolved = []
     for part in parts:
         if part["type"] == "literal":
             resolved.append(part["value"])
         elif part["type"] == "env":
-            val = resolve_env_config_value(part["name"])
+            val = resolve_env_config_value(part["name"], env)
             if val is None:
                 return None
             resolved.append(val)
@@ -149,20 +151,18 @@ def get_config_value_env_var_names(config: str) -> list[str]:
     return []
 
 
-def get_missing_config_value_env_var_names(config: str) -> list[str]:
+def get_missing_config_value_env_var_names(
+    config: str, env: dict[str, str] | None = None
+) -> list[str]:
     return [
         name
         for name in get_config_value_env_var_names(config)
-        if resolve_env_config_value(name) is None
+        if resolve_env_config_value(name, env) is None
     ]
 
 
-def is_command_config_value(config: str) -> bool:
-    return parse_config_value_reference(config)["type"] == "command"
-
-
-def is_config_value_configured(config: str) -> bool:
-    return len(get_missing_config_value_env_var_names(config)) == 0
+def is_config_value_configured(config: str, env: dict[str, str] | None = None) -> bool:
+    return len(get_missing_config_value_env_var_names(config, env)) == 0
 
 
 def is_legacy_env_var_name_config_value(config: str) -> bool:
@@ -223,23 +223,29 @@ def execute_command(command_config: str) -> str | None:
     return res
 
 
-def resolve_config_value(config: str) -> str | None:
+def is_command_config_value(config: str) -> bool:
+    return parse_config_value_reference(config)["type"] == "command"
+
+
+def resolve_config_value(config: str, env: dict[str, str] | None = None) -> str | None:
     """Resolve a config value (API key, header value, etc.) to an actual value."""
     ref = parse_config_value_reference(config)
     if ref["type"] == "command":
         return execute_command(ref["config"])
-    return resolve_template(ref["parts"])
+    return resolve_template(ref["parts"], env)
 
 
-def resolve_config_value_uncached(config: str) -> str | None:
+def resolve_config_value_uncached(config: str, env: dict[str, str] | None = None) -> str | None:
     ref = parse_config_value_reference(config)
     if ref["type"] == "command":
         return execute_command_uncached(ref["config"])
-    return resolve_template(ref["parts"])
+    return resolve_template(ref["parts"], env)
 
 
-def resolve_config_value_or_throw(config: str, description: str) -> str:
-    resolved = resolve_config_value_uncached(config)
+def resolve_config_value_or_throw(
+    config: str, description: str, env: dict[str, str] | None = None
+) -> str:
+    resolved = resolve_config_value_uncached(config, env)
     if resolved is not None:
         return resolved
 
@@ -248,7 +254,7 @@ def resolve_config_value_or_throw(config: str, description: str) -> str:
         raise ValueError(f"Failed to resolve {description} from shell command: {ref['config'][1:]}")
 
     if ref["type"] == "template":
-        missing = get_missing_config_value_env_var_names(config)
+        missing = get_missing_config_value_env_var_names(config, env)
         if len(missing) == 1:
             raise ValueError(
                 f"Failed to resolve {description} from environment variable: {missing[0]}"
@@ -261,26 +267,28 @@ def resolve_config_value_or_throw(config: str, description: str) -> str:
     raise ValueError(f"Failed to resolve {description}")
 
 
-def resolve_headers(headers: dict[str, str] | None) -> dict[str, str] | None:
+def resolve_headers(
+    headers: dict[str, str] | None, env: dict[str, str] | None = None
+) -> dict[str, str] | None:
     """Resolve all header values using the same resolution logic as API keys."""
     if not headers:
         return None
     resolved = {}
     for k, v in headers.items():
-        res_val = resolve_config_value(v)
+        res_val = resolve_config_value(v, env)
         if res_val:
             resolved[k] = res_val
     return resolved if resolved else None
 
 
 def resolve_headers_or_throw(
-    headers: dict[str, str] | None, description: str
+    headers: dict[str, str] | None, description: str, env: dict[str, str] | None = None
 ) -> dict[str, str] | None:
     if not headers:
         return None
     resolved = {}
     for k, v in headers.items():
-        resolved[k] = resolve_config_value_or_throw(v, f'{description} header "{k}"')
+        resolved[k] = resolve_config_value_or_throw(v, f'{description} header "{k}"', env)
     return resolved if resolved else None
 
 

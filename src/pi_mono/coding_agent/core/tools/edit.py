@@ -11,6 +11,7 @@ from pi_mono.coding_agent.core.tools.edit_diff import (
     apply_edits_to_normalized_content,
     detect_line_ending,
     generate_diff_string,
+    generate_unified_patch,
     normalize_to_lf,
     restore_line_endings,
     strip_bom,
@@ -109,13 +110,14 @@ async def execute_edit(
         raw_content = (await ops.read_file(absolute_path)).decode("utf-8")
         ending = detect_line_ending(raw_content)
         normalized = normalize_to_lf(strip_bom(raw_content))
-        applied = apply_edits_to_normalized_content(normalized, edits)  # type: ignore[arg-type]
+        applied = apply_edits_to_normalized_content(normalized, edits, path)  # type: ignore[arg-type]
         new_content = restore_line_endings(applied.new_content, ending)
-        diff = generate_diff_string(normalized, applied.new_content, path)
+        diff_result = generate_diff_string(normalized, applied.new_content)
+        patch = generate_unified_patch(path, normalized, applied.new_content)
         await ops.write_file(absolute_path, new_content)
         return {
             "content": [{"type": "text", "text": f"Successfully edited {path}"}],
-            "details": {"diff": diff, "patch": diff},
+            "details": {"diff": diff_result.diff, "patch": patch},
         }
 
     return await with_file_mutation_queue(absolute_path, run)

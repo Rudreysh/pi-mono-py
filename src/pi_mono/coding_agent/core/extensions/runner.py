@@ -87,7 +87,7 @@ NO_OP_UI_CONTEXT = _NoOpUIContext()
 
 
 def _build_builtin_keybindings(
-    resolved_keybindings: dict[str, str | list[str]]
+    resolved_keybindings: dict[str, str | list[str]],
 ) -> dict[str, dict[str, Any]]:
     builtin_keybindings: dict[str, dict[str, Any]] = {}
     for keybinding, keys in resolved_keybindings.items():

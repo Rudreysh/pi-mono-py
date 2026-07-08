@@ -187,7 +187,7 @@ def parse_model_pattern(
 
     last_colon_index = pattern.rfind(":")
     if last_colon_index == -1:
-        return ParsedModelResult()
+        return ParsedModelResult(model=None)
 
     prefix = pattern[:last_colon_index]
     suffix = pattern[last_colon_index + 1 :]
@@ -207,7 +207,7 @@ def parse_model_pattern(
         return result
 
     if not allow_invalid_thinking_level_fallback:
-        return ParsedModelResult()
+        return ParsedModelResult(model=None)
 
     result = parse_model_pattern(
         prefix,
@@ -276,7 +276,7 @@ def resolve_cli_model(
     cli_model: str | None = None,
     model_registry: ModelRegistry,
 ) -> ResolveCliModelResult:
-    if not cli_model:
+    if not cli_model and not cli_provider:
         return ResolveCliModelResult()
 
     available_models = model_registry.get_all()
@@ -286,6 +286,37 @@ def resolve_cli_model(
         )
 
     provider_map = {model["provider"].lower(): model["provider"] for model in available_models}
+
+    if not cli_model and cli_provider:
+        canonical_provider = provider_map.get(cli_provider.lower())
+        if not canonical_provider:
+            return ResolveCliModelResult(
+                error=(
+                    f'Unknown provider "{cli_provider}". '
+                    "Use --list-models to see available providers/models."
+                )
+            )
+        default_id = default_model_per_provider.get(canonical_provider.lower())
+        if default_id:
+            cli_model = default_id
+        else:
+            provider_models = [
+                model for model in available_models if model["provider"] == canonical_provider
+            ]
+            if len(provider_models) == 1:
+                return ResolveCliModelResult(model=provider_models[0])
+            if provider_models:
+                cli_model = provider_models[0]["id"]
+            else:
+                return ResolveCliModelResult(
+                    error=(
+                        f'No models found for provider "{cli_provider}". '
+                        "Use --list-models to see available providers/models."
+                    )
+                )
+
+    if not cli_model:
+        return ResolveCliModelResult()
 
     provider = provider_map.get(cli_provider.lower()) if cli_provider else None
     if cli_provider and not provider:

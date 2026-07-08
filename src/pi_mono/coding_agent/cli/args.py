@@ -58,6 +58,7 @@ class Args:
     list_models: str | bool | None = None
     offline: bool = False
     verbose: bool = False
+    project_trust_override: bool | None = None
     messages: list[str] = field(default_factory=list)
     file_args: list[str] = field(default_factory=list)
     unknown_flags: dict[str, bool | str] = field(default_factory=dict)
@@ -209,6 +210,10 @@ def parse_args(args: list[str]) -> Args:
             result.verbose = True
         elif arg == "--offline":
             result.offline = True
+        elif arg in ("--approve", "-a"):
+            result.project_trust_override = True
+        elif arg in ("--no-approve", "-na"):
+            result.project_trust_override = False
         elif arg.startswith("@"):
             result.file_args.append(arg[1:])
         elif arg.startswith("--"):

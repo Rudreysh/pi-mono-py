@@ -279,5 +279,36 @@ async def generate_branch_summary(
     )
 
 
+def collect_entries_for_branch_summary_sync(
+    session_manager: Any,
+    old_leaf_id: str | None,
+    target_id: str,
+) -> dict[str, Any]:
+    if not old_leaf_id:
+        return {"entries": [], "commonAncestorId": None}
+
+    old_path = session_manager.get_branch(old_leaf_id)
+    old_path_set = {entry["id"] for entry in old_path}
+    target_path = session_manager.get_branch(target_id)
+    common_ancestor_id: str | None = None
+
+    for entry in reversed(target_path):
+        if entry["id"] in old_path_set:
+            common_ancestor_id = entry["id"]
+            break
+
+    entries: list[dict[str, Any]] = []
+    current: str | None = old_leaf_id
+    while current and current != common_ancestor_id:
+        entry = session_manager.get_entry(current)
+        if not entry:
+            raise RuntimeError(f"Entry {current} not found")
+        entries.append(entry)
+        current = entry.get("parentId")
+
+    entries.reverse()
+    return {"entries": entries, "commonAncestorId": common_ancestor_id}
+
+
 collectEntriesForBranchSummary = collect_entries_for_branch_summary
 generateBranchSummary = generate_branch_summary

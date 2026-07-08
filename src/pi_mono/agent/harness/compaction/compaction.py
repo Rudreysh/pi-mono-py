@@ -228,6 +228,10 @@ def estimate_text_and_image_content_chars(content: str | list[dict]) -> int:
     return chars
 
 
+def estimate_messages_tokens(messages: list[AgentMessage]) -> int:
+    return sum(estimate_tokens(message) for message in messages)
+
+
 def estimate_tokens(message: AgentMessage) -> int:
     chars = 0
     role = message.get("role", "")
@@ -598,7 +602,15 @@ def prepare_compaction(
         )
 
     boundary_end = len(path_entries)
-    tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
+    if path_entries and isinstance(path_entries[0], dict):
+        from pi_mono.core.session_manager import (
+            build_session_context as build_branch_session_context,
+        )
+
+        branch_context = build_branch_session_context(path_entries)
+        tokens_before = estimate_context_tokens(branch_context["messages"]).tokens
+    else:
+        tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
 
     cut_point = find_cut_point(
         path_entries, boundary_start, boundary_end, settings["keepRecentTokens"]
@@ -624,6 +636,9 @@ def prepare_compaction(
             msg = get_message_from_entry_for_compaction(path_entries[i])
             if msg:
                 turn_prefix_messages.append(msg)
+
+    if not messages_to_summarize and not turn_prefix_messages:
+        return ok(None)
 
     file_ops = extract_file_operations(messages_to_summarize, path_entries, prev_compaction_index)
     if cut_point.is_split_turn:

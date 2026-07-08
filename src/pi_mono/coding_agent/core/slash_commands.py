@@ -40,6 +40,7 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("fork", "Create a new fork from a previous user message"),
     BuiltinSlashCommand("clone", "Duplicate the current session at the current position"),
     BuiltinSlashCommand("tree", "Navigate session tree (switch branches)"),
+    BuiltinSlashCommand("trust", "Change project trust decision"),
     BuiltinSlashCommand("login", "Configure provider authentication"),
     BuiltinSlashCommand("logout", "Remove provider authentication"),
     BuiltinSlashCommand("new", "Start a new session"),

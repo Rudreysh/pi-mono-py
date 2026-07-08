@@ -6,22 +6,47 @@ Ported from packages/coding-agent/src/package-manager-cli.ts (local-path subset)
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from pi_mono.config import APP_NAME, get_agent_dir
+from pi_mono.config import (
+    APP_NAME,
+    PACKAGE_NAME,
+    VERSION,
+    detect_install_method,
+    get_agent_dir,
+    get_package_dir,
+    get_self_update_command,
+    get_self_update_unavailable_instruction,
+)
 from pi_mono.coding_agent.core.package_manager import DefaultPackageManager
 from pi_mono.core.settings_manager import SettingsManager
+from pi_mono.utils.version_check import get_latest_pi_release, is_newer_package_version
+from pi_mono.utils.windows_self_update import (
+    cleanup_windows_self_update_quarantine,
+    quarantine_windows_native_dependencies,
+)
 
 PackageCommand = Literal["install", "remove", "update", "list"]
+UpdateTargetType = Literal["all", "self", "extensions"]
+
+
+@dataclass
+class UpdateTarget:
+    type: UpdateTargetType
+    source: str | None = None
 
 
 @dataclass
 class PackageCommandOptions:
     command: PackageCommand
     source: str | None = None
+    update_target: UpdateTarget | None = None
+    show_extensions_skipped_note: bool = False
     local: bool = False
+    force: bool = False
     help: bool = False
     invalid_option: str | None = None
     invalid_argument: str | None = None
@@ -35,7 +60,7 @@ def _get_package_command_usage(command: PackageCommand) -> str:
     if command == "remove":
         return f"{APP_NAME} remove <source> [-l]"
     if command == "update":
-        return f"{APP_NAME} update"
+        return f"{APP_NAME} update [source|self|pi] [--self|--extensions|--all] [--extension <source>] [--force]"
     return f"{APP_NAME} list"
 
 
@@ -78,7 +103,19 @@ Options:
             f"""Usage:
   {_get_package_command_usage("update")}
 
-Update pi and installed npm/git packages (not implemented in Python v1).
+Update pi and/or installed npm/git packages.
+
+Options:
+  --self                  Update pi only (default when no target is given)
+  --extensions            Update installed packages only
+  --all                   Update pi and installed packages
+  --extension <source>    Update a specific package source
+  --force                 Force self-update even if already on latest version
+
+Examples:
+  {APP_NAME} update
+  {APP_NAME} update --extensions
+  {APP_NAME} update --all
 """
         )
         return
@@ -106,12 +143,19 @@ def parse_package_command(args: list[str]) -> PackageCommandOptions | None:
 
     rest = args[1:]
     local = False
+    force = False
     help_requested = False
     invalid_option: str | None = None
     invalid_argument: str | None = None
     missing_option_value: str | None = None
     conflicting_options: str | None = None
     source: str | None = None
+    update_target: UpdateTarget | None = None
+    show_extensions_skipped_note = False
+    self_flag = False
+    extensions_flag = False
+    all_flag = False
+    extension_flag_source: str | None = None
 
     index = 0
     while index < len(rest):
@@ -129,6 +173,36 @@ def parse_package_command(args: list[str]) -> PackageCommandOptions | None:
             index += 1
             continue
 
+        if command == "update":
+            if arg == "--force":
+                force = True
+                index += 1
+                continue
+            if arg == "--self":
+                self_flag = True
+                index += 1
+                continue
+            if arg == "--extensions":
+                extensions_flag = True
+                index += 1
+                continue
+            if arg == "--all":
+                all_flag = True
+                index += 1
+                continue
+            if arg == "--extension":
+                if index + 1 >= len(rest):
+                    missing_option_value = missing_option_value or arg
+                    index += 1
+                    continue
+                extension_flag_source = rest[index + 1]
+                index += 2
+                continue
+            if arg in ("self", "pi"):
+                source = arg
+                index += 1
+                continue
+
         if arg.startswith("-"):
             invalid_option = invalid_option or arg
             index += 1
@@ -140,16 +214,101 @@ def parse_package_command(args: list[str]) -> PackageCommandOptions | None:
             invalid_argument = invalid_argument or arg
         index += 1
 
+    if command == "update":
+        if all_flag and (self_flag or extensions_flag or extension_flag_source or source):
+            conflicting_options = (
+                conflicting_options or "--all cannot be combined with other update targets"
+            )
+        if extension_flag_source and (self_flag or extensions_flag or all_flag):
+            conflicting_options = (
+                conflicting_options
+                or "--extension cannot be combined with --self, --extensions, or --all"
+            )
+        if source and source not in ("self", "pi") and (self_flag or extensions_flag or all_flag):
+            conflicting_options = (
+                conflicting_options
+                or "positional update targets cannot be combined with --self, --extensions, or --all"
+            )
+        if extension_flag_source:
+            update_target = UpdateTarget(type="extensions", source=extension_flag_source)
+        elif source == "self" or source == "pi":
+            update_target = UpdateTarget(type="self")
+        elif source:
+            update_target = UpdateTarget(type="extensions", source=source)
+        elif all_flag:
+            update_target = UpdateTarget(type="all")
+        elif extensions_flag:
+            update_target = UpdateTarget(type="extensions")
+        elif self_flag:
+            update_target = UpdateTarget(type="self")
+        else:
+            update_target = UpdateTarget(type="self")
+            show_extensions_skipped_note = True
+
     return PackageCommandOptions(
         command=command,
         source=source,
+        update_target=update_target,
+        show_extensions_skipped_note=show_extensions_skipped_note,
         local=local,
+        force=force,
         help=help_requested,
         invalid_option=invalid_option,
         invalid_argument=invalid_argument,
         missing_option_value=missing_option_value,
         conflicting_options=conflicting_options,
     )
+
+
+def _update_target_includes_self(target: UpdateTarget) -> bool:
+    return target.type in ("all", "self")
+
+
+def _update_target_includes_extensions(target: UpdateTarget) -> bool:
+    return target.type in ("all", "extensions")
+
+
+def _prepare_windows_npm_self_update() -> None:
+    if sys.platform != "win32":
+        return
+    package_dir = str(get_package_dir())
+    cleanup_windows_self_update_quarantine(package_dir)
+    quarantine_windows_native_dependencies(package_dir)
+
+
+async def _get_self_update_plan(force: bool) -> dict[str, Any]:
+    if force:
+        return {"packageName": PACKAGE_NAME, "shouldRun": True}
+    try:
+        latest_release = await get_latest_pi_release(VERSION)
+        package_name = (
+            latest_release.get("packageName", PACKAGE_NAME) if latest_release else PACKAGE_NAME
+        )
+        if (
+            not latest_release
+            or package_name != PACKAGE_NAME
+            or is_newer_package_version(latest_release["version"], VERSION)
+        ):
+            plan: dict[str, Any] = {"packageName": package_name, "shouldRun": True}
+            if latest_release and latest_release.get("note"):
+                plan["note"] = latest_release["note"]
+            return plan
+    except Exception:
+        return {"packageName": PACKAGE_NAME, "shouldRun": True}
+    print(f"{APP_NAME} is already up to date (v{VERSION})")
+    return {"packageName": PACKAGE_NAME, "shouldRun": False}
+
+
+def _run_self_update(command: dict[str, Any]) -> None:
+    print(f"Updating {APP_NAME} with {command.get('display', command.get('command', ''))}...")
+    steps = command.get("steps") or [command]
+    for step in steps:
+        args = list(step.get("args", []))
+        completed = subprocess.run([step["command"], *args], check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"{step.get('display', step['command'])} exited with code {completed.returncode}"
+            )
 
 
 def _report_settings_errors(settings_manager: SettingsManager, context: str) -> None:
@@ -265,7 +424,54 @@ async def handle_package_command(args: list[str]) -> bool:
             return True
 
         if options.command == "update":
-            await package_manager.update(options.source)
+            target = options.update_target or UpdateTarget(type="self")
+            if options.show_extensions_skipped_note:
+                print(
+                    f"Extensions are skipped. Run {APP_NAME} update --extensions to update extensions."
+                )
+            if _update_target_includes_extensions(target):
+                update_source = target.source if target.type == "extensions" else None
+                await package_manager.update(update_source)
+                if update_source:
+                    print(f"Updated {update_source}")
+                else:
+                    print("Updated packages")
+            if _update_target_includes_self(target):
+                self_update_plan = await _get_self_update_plan(options.force)
+                if not self_update_plan.get("shouldRun"):
+                    return True
+                install_method = detect_install_method()
+                if sys.platform == "win32" and install_method not in ("npm", "pnpm"):
+                    print(
+                        f"{APP_NAME} self-update on Windows is only supported for npm and pnpm installs.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"Detected install method: {install_method}. Update {APP_NAME} manually.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                npm_command = settings_manager.get_global_settings().get("npmCommand")
+                self_update_command = get_self_update_command(
+                    PACKAGE_NAME,
+                    npm_command,
+                    self_update_plan.get("packageName", PACKAGE_NAME),
+                )
+                if not self_update_command:
+                    print(
+                        get_self_update_unavailable_instruction(
+                            PACKAGE_NAME,
+                            npm_command,
+                            self_update_plan.get("packageName", PACKAGE_NAME),
+                        ),
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if self_update_plan.get("note"):
+                    print(self_update_plan["note"])
+                _prepare_windows_npm_self_update()
+                _run_self_update(self_update_command)
+                print(f"Updated {APP_NAME}")
             return True
     except Exception as error:
         print(f"Error: {error}", file=sys.stderr)
