@@ -1,6 +1,7 @@
 """Extension system for lifecycle events and custom tools."""
 
 from pi_mono.coding_agent.core.extensions.loader import (
+    collect_configured_extension_paths,
     create_extension_runtime,
     discover_and_load_extensions,
     discover_extensions_in_dir,
@@ -77,6 +78,7 @@ __all__ = [
     "ToolDefinition",
     "UserBashEvent",
     "UserBashEventResult",
+    "collect_configured_extension_paths",
     "create_extension_runtime",
     "define_tool",
     "discover_and_load_extensions",

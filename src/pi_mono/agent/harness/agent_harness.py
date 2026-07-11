@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Generic
 
@@ -13,6 +14,7 @@ from pi_mono.agent.harness.compaction.branch_summarization import (
     generate_branch_summary,
     collect_entries_for_branch_summary,
 )
+from pi_mono.agent.harness.env.local import LocalExecutionEnv
 from pi_mono.agent.harness.compaction.compaction import (
     prepare_compaction,
     compact,
@@ -74,7 +76,12 @@ class AgentHarness(Generic[TSkill, TPromptTemplate, TTool]):
         self,
         options: AgentHarnessOptions[TSkill, TPromptTemplate, TTool],
     ) -> None:
-        self.env = options["env"]
+        env = options.get("env")
+        if env is None:
+            session = options["session"]
+            cwd = getattr(session, "cwd", None) or os.getcwd()
+            env = LocalExecutionEnv(cwd=cwd)
+        self.env = env
         self.session = options["session"]
         self.resources = get_harness_option(options, "resources", "resources", {}) or {}
         self.stream_options = clone_stream_options(

@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 from pi_mono.coding_agent.core.agent_session import AgentSessionRuntime, PromptOptions
 from pi_mono.coding_agent.core.extensions.types import ExtensionUIContext
-from pi_mono.coding_agent.core.slash_commands import BUILTIN_SLASH_COMMANDS
+from pi_mono.coding_agent.core.source_info import SourceInfo
 from pi_mono.coding_agent.modes.rpc.jsonl import JsonlLineReader, serialize_json_line
 from pi_mono.coding_agent.modes.rpc.rpc_types import (
     RpcCommand,
@@ -30,6 +30,7 @@ from pi_mono.core.output_guard import (
     wait_for_raw_stdout_backpressure,
     write_raw_stdout,
 )
+from pi_mono.utils.shell import kill_tracked_detached_children
 
 
 def parse_rpc_command(line: str) -> RpcCommand:
@@ -318,16 +319,66 @@ class RpcExtensionUIContext:
         return None
 
 
-def build_builtin_commands() -> list[RpcSlashCommand]:
-    return [
-        {
-            "name": cmd.name,
-            "description": cmd.description,
-            "source": "prompt",
-            "sourceInfo": {"scope": "builtin", "source": "builtin", "path": ""},
+def _source_info_to_rpc(source_info: SourceInfo | dict[str, Any] | None) -> dict[str, Any]:
+    if source_info is None:
+        return {}
+    if isinstance(source_info, SourceInfo):
+        payload: dict[str, Any] = {
+            "path": source_info.path,
+            "source": source_info.source,
+            "scope": source_info.scope,
+            "origin": source_info.origin,
         }
-        for cmd in BUILTIN_SLASH_COMMANDS
-    ]
+        if source_info.base_dir is not None:
+            payload["baseDir"] = source_info.base_dir
+        return payload
+    return dict(source_info)
+
+
+def build_prompt_template_commands(session) -> list[RpcSlashCommand]:
+    commands: list[RpcSlashCommand] = []
+    for template in session.prompt_templates:
+        name = template["name"] if isinstance(template, dict) else template.name
+        description = (
+            template.get("description", "")
+            if isinstance(template, dict)
+            else (template.description or "")
+        )
+        source_info = (
+            template.get("sourceInfo")
+            if isinstance(template, dict)
+            else getattr(template, "source_info", None)
+        )
+        commands.append(
+            {
+                "name": name,
+                "description": description,
+                "source": "prompt",
+                "sourceInfo": _source_info_to_rpc(source_info),
+            }
+        )
+    return commands
+
+
+def build_skill_commands(session) -> list[RpcSlashCommand]:
+    commands: list[RpcSlashCommand] = []
+    for skill in session.resource_loader.get_skills().get("skills", []):
+        name = skill["name"] if isinstance(skill, dict) else skill.name
+        description = skill.get("description", "") if isinstance(skill, dict) else skill.description
+        source_info = (
+            skill.get("sourceInfo")
+            if isinstance(skill, dict)
+            else getattr(skill, "source_info", None)
+        )
+        commands.append(
+            {
+                "name": f"skill:{name}",
+                "description": description,
+                "source": "skill",
+                "sourceInfo": _source_info_to_rpc(source_info),
+            }
+        )
+    return commands
 
 
 def build_extension_commands(session) -> list[RpcSlashCommand]:
@@ -356,9 +407,12 @@ class RpcMode:
         self._runtime_host = runtime_host
         self._session = runtime_host.session
         self._unsubscribe = None
+        self._unsubscribe_backpressure = None
+        self._backpressure_listener = None
         self._shutting_down = False
         self._signal_handlers: list[tuple[int, Any]] = []
         self._pending_extension_requests: dict[str, PendingExtensionResolver] = {}
+        self._pending_input_tasks: set[asyncio.Task[Any]] = set()
         self._extension_ui_context = RpcExtensionUIContext(
             self.output, self._pending_extension_requests
         )
@@ -404,11 +458,18 @@ class RpcMode:
         )
         if self._unsubscribe is not None:
             self._unsubscribe()
+        if self._unsubscribe_backpressure is not None:
+            self._unsubscribe_backpressure()
+
+        async def backpressure_listener(_event: object, _signal: object) -> None:
+            await wait_for_raw_stdout_backpressure()
+
+        self._backpressure_listener = backpressure_listener
         self._unsubscribe = self._session.subscribe(self.output)
+        self._unsubscribe_backpressure = self._session.agent.subscribe(backpressure_listener)
 
     async def _wait_for_idle(self) -> None:
-        while self._session.is_streaming:
-            await asyncio.sleep(0.05)
+        await self._session.wait_for_idle()
 
     async def handle_command(self, command: RpcCommand) -> RpcResponse | None:
         command_id = command.get("id")  # type: ignore[union-attr]
@@ -419,13 +480,29 @@ class RpcMode:
             if not isinstance(message, str):
                 return build_error_response(command_id, "prompt", "prompt.message must be a string")
             images = command.get("images")  # type: ignore[union-attr]
+            streaming_behavior = command.get("streamingBehavior")  # type: ignore[union-attr]
+            preflight_succeeded = False
+
+            def preflight_result(success: bool) -> None:
+                nonlocal preflight_succeeded
+                if success:
+                    preflight_succeeded = True
+                    self.output(build_success_response(command_id, "prompt"))
+
+            prompt_options = PromptOptions(
+                images=images if isinstance(images, list) else None,
+                source="rpc",
+                preflight_result=preflight_result,
+            )
+            if streaming_behavior in ("steer", "followUp"):
+                prompt_options.streaming_behavior = streaming_behavior  # type: ignore[assignment]
 
             async def _run_prompt() -> None:
                 try:
-                    await self._session.prompt(message, PromptOptions(images=images))
-                    self.output(build_success_response(command_id, "prompt"))
+                    await self._session.prompt(message, prompt_options)
                 except Exception as error:
-                    self.output(build_error_response(command_id, "prompt", str(error)))
+                    if not preflight_succeeded:
+                        self.output(build_error_response(command_id, "prompt", str(error)))
                 await wait_for_raw_stdout_backpressure()
 
             asyncio.create_task(_run_prompt())
@@ -450,11 +527,13 @@ class RpcMode:
             return build_success_response(command_id, "follow_up")
 
         if command_type == "abort":
-            self._session.agent.abort()
+            await self._session.abort()
             return build_success_response(command_id, "abort")
 
         if command_type == "new_session":
-            result = await self._runtime_host.new_session()
+            parent_session = command.get("parentSession")  # type: ignore[union-attr]
+            options = {"parentSession": parent_session} if isinstance(parent_session, str) else None
+            result = await self._runtime_host.new_session(options)
             if not result.get("cancelled"):
                 await self._rebind_session()
             return build_success_response(command_id, "new_session", result)
@@ -578,13 +657,48 @@ class RpcMode:
             messages = self._session.get_user_messages_for_forking()
             return build_success_response(command_id, "get_fork_messages", {"messages": messages})
 
+        if command_type == "get_entries":
+            session_manager = self._session.session_manager
+            entries = session_manager.get_entries()
+            since = command.get("since")  # type: ignore[union-attr]
+            if since is not None:
+                since_index = next(
+                    (i for i, entry in enumerate(entries) if entry.get("id") == since),
+                    -1,
+                )
+                if since_index == -1:
+                    return build_error_response(
+                        command_id, "get_entries", f"Entry not found: {since}"
+                    )
+                entries = entries[since_index + 1 :]
+            return build_success_response(
+                command_id,
+                "get_entries",
+                {"entries": entries, "leafId": session_manager.get_leaf_id()},
+            )
+
+        if command_type == "get_tree":
+            session_manager = self._session.session_manager
+            return build_success_response(
+                command_id,
+                "get_tree",
+                {
+                    "tree": session_manager.get_tree(),
+                    "leafId": session_manager.get_leaf_id(),
+                },
+            )
+
         if command_type == "get_messages":
             return build_success_response(
                 command_id, "get_messages", {"messages": self._session.messages}
             )
 
         if command_type == "get_commands":
-            commands = [*build_builtin_commands(), *build_extension_commands(self._session)]
+            commands = [
+                *build_extension_commands(self._session),
+                *build_prompt_template_commands(self._session),
+                *build_skill_commands(self._session),
+            ]
             return build_success_response(command_id, "get_commands", {"commands": commands})
 
         if command_type == "export_html":
@@ -597,13 +711,21 @@ class RpcMode:
             return build_success_response(command_id, "export_html", {"path": path})
 
         if command_type == "clone":
-            result = await self._runtime_host.fork(
-                self._session.session_manager.leafId or "",
-                {"position": "at"},
-            )
+            leaf_id = self._session.session_manager.get_leaf_id()
+            if not leaf_id:
+                return build_error_response(
+                    command_id,
+                    "clone",
+                    "Cannot clone session: no current entry selected",
+                )
+            result = await self._runtime_host.fork(leaf_id, {"position": "at"})
             if not result.get("cancelled"):
                 await self._rebind_session()
-            return build_success_response(command_id, "clone", result)
+            return build_success_response(
+                command_id,
+                "clone",
+                {"cancelled": result.get("cancelled", False)},
+            )
 
         if command_type == "abort_bash":
             self._session.abort_bash()
@@ -613,6 +735,15 @@ class RpcMode:
             enabled = command.get("enabled")  # type: ignore[union-attr]
             self._session.settings_manager.set_compaction_enabled(bool(enabled))
             return build_success_response(command_id, "set_auto_compaction")
+
+        if command_type == "set_auto_retry":
+            enabled = command.get("enabled")  # type: ignore[union-attr]
+            self._session.set_auto_retry(bool(enabled))
+            return build_success_response(command_id, "set_auto_retry")
+
+        if command_type == "abort_retry":
+            self._session.abort_retry()
+            return build_success_response(command_id, "abort_retry")
 
         return build_error_response(
             command_id, str(command_type), f"Unknown command: {command_type}"
@@ -654,6 +785,7 @@ class RpcMode:
                 previous = signal.getsignal(signum)
 
                 def handler(_signum: int, _frame: object | None, _previous: Any = previous) -> None:
+                    kill_tracked_detached_children()
                     asyncio.create_task(self.shutdown(_signum))
 
                 signal.signal(signum, handler)
@@ -676,45 +808,41 @@ class RpcMode:
             return
         self._shutting_down = True
         self._unregister_signal_handlers()
+        kill_tracked_detached_children()
         if self._unsubscribe is not None:
             self._unsubscribe()
+        if self._unsubscribe_backpressure is not None:
+            self._unsubscribe_backpressure()
         await self._runtime_host.dispose()
         if signum != signal.SIGTERM:
             await flush_raw_stdout()
         if signum is not None:
             raise SystemExit(129 if signum == signal.SIGHUP else 143)
 
+    def _enqueue_input_line(self, line: str) -> None:
+        task = asyncio.create_task(self.handle_input_line(line))
+        self._pending_input_tasks.add(task)
+        task.add_done_callback(self._pending_input_tasks.discard)
+
     async def run(self) -> None:
         take_over_stdout()
         self._register_signal_handlers()
         await self._rebind_session()
 
-        reader = JsonlLineReader(lambda line: asyncio.create_task(self.handle_input_line(line)))
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[bytes] = asyncio.Queue()
+        reader = JsonlLineReader(self._enqueue_input_line)
+        await self._stdin_reader_loop(reader)
 
-        def on_stdin_ready() -> None:
-            while True:
-                chunk = sys.stdin.buffer.read1(65536)
-                if not chunk:
-                    queue.put_nowait(b"")
-                    return
-                queue.put_nowait(chunk)
-
-        loop.add_reader(sys.stdin.fileno(), on_stdin_ready)
-
-        try:
-            while True:
-                chunk = await queue.get()
-                if not chunk:
-                    await self.shutdown()
-                    return
-                reader.feed(chunk.decode("utf-8", errors="replace"))
-        finally:
-            try:
-                loop.remove_reader(sys.stdin.fileno())
-            except Exception:
-                pass
+    async def _stdin_reader_loop(self, reader: JsonlLineReader) -> None:
+        while not self._shutting_down:
+            chunk = await asyncio.to_thread(sys.stdin.buffer.read, 65536)
+            if not chunk:
+                reader.flush()
+                if self._pending_input_tasks:
+                    await asyncio.gather(*list(self._pending_input_tasks), return_exceptions=True)
+                await wait_for_raw_stdout_backpressure()
+                await self.shutdown()
+                return
+            reader.feed(chunk.decode("utf-8", errors="replace"))
 
 
 async def run_rpc_mode(runtime_host: AgentSessionRuntime) -> None:

@@ -36,7 +36,7 @@ def build_system_prompt(
             for file_entry in resolved_context_files:
                 prompt += (
                     f'<project_instructions path="{file_entry["path"]}">\n'
-                    f'{file_entry["content"]}\n</project_instructions>\n\n'
+                    f"{file_entry['content']}\n</project_instructions>\n\n"
                 )
             prompt += "</project_context>\n"
         custom_prompt_has_read = not selected_tools or "read" in selected_tools
@@ -112,7 +112,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
         for file_entry in resolved_context_files:
             prompt += (
                 f'<project_instructions path="{file_entry["path"]}">\n'
-                f'{file_entry["content"]}\n</project_instructions>\n\n'
+                f"{file_entry['content']}\n</project_instructions>\n\n"
             )
         prompt += "</project_context>\n"
 

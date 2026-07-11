@@ -130,7 +130,10 @@ async def login(
             print("Cursor login completed via agent CLI.")
             return
         except FileNotFoundError:
-            print("Error: Cursor Agent CLI not found. Install `agent` or set CURSOR_AGENT_PATH.", file=sys.stderr)
+            print(
+                "Error: Cursor Agent CLI not found. Install `agent` or set CURSOR_AGENT_PATH.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         except Exception as e:
             print(f"\nError logging in to Cursor: {e}", file=sys.stderr)
@@ -165,7 +168,7 @@ async def main() -> None:
     if not command or command in ("help", "--help", "-h"):
         provider_list = "\n".join(f"  {p.id:<20} {p.name}" for p in PROVIDERS)
         print(
-        f"""Usage: python -m pi_mono.ai.cli <command> [provider]
+            f"""Usage: python -m pi_mono.ai.cli <command> [provider]
 
 Commands:
   login [provider]  Login to a provider

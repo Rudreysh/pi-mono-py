@@ -29,15 +29,26 @@ from pi_mono.coding_agent.modes.interactive.components.settings_selector import 
     build_settings_config_from_session,
     build_settings_items,
 )
+from pi_mono.coding_agent.modes.interactive.components.diff import render_diff
+from pi_mono.coding_agent.modes.interactive.components.extension_input import (
+    ExtensionInputComponent,
+)
+from pi_mono.coding_agent.modes.interactive.components.show_images_selector import (
+    ShowImagesSelectorComponent,
+)
 from pi_mono.coding_agent.modes.interactive.components.thinking_selector import (
     ThinkingSelectorComponent,
 )
 from pi_mono.coding_agent.modes.interactive.components.tool_execution import ToolExecutionComponent
+from pi_mono.coding_agent.modes.interactive.components.user_message_selector import (
+    UserMessageSelectorComponent,
+)
 
 __all__ = [
     "AssistantMessageComponent",
     "AuthSelectorProvider",
     "BorderedLoader",
+    "ExtensionInputComponent",
     "FooterComponent",
     "LoginDialogComponent",
     "ModelSelectorComponent",
@@ -46,12 +57,15 @@ __all__ = [
     "SettingsCallbacks",
     "SettingsConfig",
     "SettingsSelectorComponent",
+    "ShowImagesSelectorComponent",
     "SimpleFooterDataProvider",
     "ThinkingSelectorComponent",
     "ToolExecutionComponent",
+    "UserMessageSelectorComponent",
     "build_settings_config_from_session",
     "build_settings_items",
     "filter_and_sort_sessions",
     "has_session_name",
     "parse_search_query",
+    "render_diff",
 ]

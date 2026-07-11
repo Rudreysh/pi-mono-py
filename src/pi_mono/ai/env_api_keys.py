@@ -1,44 +1,26 @@
 import os
 
-_proc_env_cache: dict[str, str] | None = None
+from pi_mono.ai.types import ProviderEnv
+from pi_mono.ai.utils.provider_env import get_provider_env_value
+
 _cached_vertex_adc_credentials_exists: bool | None = None
 
 
-def get_proc_env(key: str) -> str | None:
-    global _proc_env_cache
-    val = os.environ.get(key)
-    if val is not None:
-        return val
-
-    if _proc_env_cache is None:
-        _proc_env_cache = {}
-        try:
-            if os.path.exists("/proc/self/environ"):
-                with open("/proc/self/environ", "rb") as f:
-                    data = f.read()
-                for entry_bytes in data.split(b"\0"):
-                    if b"=" in entry_bytes:
-                        k, v = entry_bytes.split(b"=", 1)
-                        _proc_env_cache[k.decode("utf-8", errors="ignore")] = v.decode(
-                            "utf-8", errors="ignore"
-                        )
-        except Exception:
-            pass
-    return _proc_env_cache.get(key)
-
-
-def has_vertex_adc_credentials() -> bool:
+def has_vertex_adc_credentials(env: ProviderEnv | None = None) -> bool:
     global _cached_vertex_adc_credentials_exists
-    if _cached_vertex_adc_credentials_exists is None:
-        gac_path = get_proc_env("GOOGLE_APPLICATION_CREDENTIALS")
+    if _cached_vertex_adc_credentials_exists is None or env is not None:
+        gac_path = get_provider_env_value("GOOGLE_APPLICATION_CREDENTIALS", env)
         if gac_path:
-            _cached_vertex_adc_credentials_exists = os.path.exists(gac_path)
-        else:
-            home = os.path.expanduser("~")
-            adc_path = os.path.join(
-                home, ".config", "gcloud", "application_default_credentials.json"
-            )
-            _cached_vertex_adc_credentials_exists = os.path.exists(adc_path)
+            exists = os.path.exists(gac_path)
+            if env is None:
+                _cached_vertex_adc_credentials_exists = exists
+            return exists
+        home = os.path.expanduser("~")
+        adc_path = os.path.join(home, ".config", "gcloud", "application_default_credentials.json")
+        exists = os.path.exists(adc_path)
+        if env is None:
+            _cached_vertex_adc_credentials_exists = exists
+        return exists
     return _cached_vertex_adc_credentials_exists
 
 
@@ -88,26 +70,27 @@ def get_api_key_env_vars(provider: str) -> list[str] | None:
     return [env_var] if env_var else None
 
 
-def find_env_keys(provider: str) -> list[str] | None:
+def find_env_keys(provider: str, env: ProviderEnv | None = None) -> list[str] | None:
     env_vars = get_api_key_env_vars(provider)
     if not env_vars:
         return None
 
-    found = [var for var in env_vars if get_proc_env(var) is not None]
-    return found if len(found) > 0 else None
+    found = [var for var in env_vars if get_provider_env_value(var, env) is not None]
+    return found if found else None
 
 
-def get_env_api_key(provider: str) -> str | None:
-    env_keys = find_env_keys(provider)
-    if env_keys and len(env_keys) > 0:
-        return get_proc_env(env_keys[0])
+def get_env_api_key(provider: str, env: ProviderEnv | None = None) -> str | None:
+    env_keys = find_env_keys(provider, env)
+    if env_keys:
+        return get_provider_env_value(env_keys[0], env)
 
     if provider == "google-vertex":
-        has_credentials = has_vertex_adc_credentials()
+        has_credentials = has_vertex_adc_credentials(env)
         has_project = any(
-            get_proc_env(var) is not None for var in ["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"]
+            get_provider_env_value(var, env) is not None
+            for var in ["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"]
         )
-        has_location = get_proc_env("GOOGLE_CLOUD_LOCATION") is not None
+        has_location = get_provider_env_value("GOOGLE_CLOUD_LOCATION", env) is not None
 
         if has_credentials and has_project and has_location:
             return "<authenticated>"
@@ -122,13 +105,12 @@ def get_env_api_key(provider: str) -> str | None:
             "AWS_CONTAINER_CREDENTIALS_FULL_URI",
             "AWS_WEB_IDENTITY_TOKEN_FILE",
         ]
-        # For access key/secret access key, both must be present
         has_access_keys = (
-            get_proc_env("AWS_ACCESS_KEY_ID") is not None
-            and get_proc_env("AWS_SECRET_ACCESS_KEY") is not None
+            get_provider_env_value("AWS_ACCESS_KEY_ID", env) is not None
+            and get_provider_env_value("AWS_SECRET_ACCESS_KEY", env) is not None
         )
         has_other_aws_vars = any(
-            get_proc_env(var) is not None
+            get_provider_env_value(var, env) is not None
             for var in aws_vars
             if var not in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
         )

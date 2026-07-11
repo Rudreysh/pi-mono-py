@@ -27,7 +27,14 @@ class BuiltinSlashCommand:
 
 BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("settings", "Open settings menu"),
-    BuiltinSlashCommand("model", "Select model (opens selector UI)"),
+    BuiltinSlashCommand(
+        "model",
+        "Select model (provider list, then models; or /model provider/id)",
+    ),
+    BuiltinSlashCommand(
+        "provider",
+        "Select provider first, then a model from that provider",
+    ),
     BuiltinSlashCommand("scoped-models", "Enable/disable models for Ctrl+P cycling"),
     BuiltinSlashCommand("export", "Export session (HTML default, or specify path: .html/.jsonl)"),
     BuiltinSlashCommand("import", "Import and resume a session from a JSONL file"),
@@ -40,6 +47,7 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
     BuiltinSlashCommand("fork", "Create a new fork from a previous user message"),
     BuiltinSlashCommand("clone", "Duplicate the current session at the current position"),
     BuiltinSlashCommand("tree", "Navigate session tree (switch branches)"),
+    BuiltinSlashCommand("trust", "Change project trust decision"),
     BuiltinSlashCommand("login", "Configure provider authentication"),
     BuiltinSlashCommand("logout", "Remove provider authentication"),
     BuiltinSlashCommand("new", "Start a new session"),

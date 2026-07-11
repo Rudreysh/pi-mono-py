@@ -21,6 +21,15 @@ ExtensionFactory = Callable[["ExtensionAPI"], Awaitable[None] | None]
 ExtensionHandler = Callable[[Any, "ExtensionContext"], Awaitable[Any] | Any]
 
 
+class BeforeProviderHeadersEvent(TypedDict):
+    type: Literal["before_provider_headers"]
+    headers: dict[str, str]
+
+
+class AgentSettledEvent(TypedDict):
+    type: Literal["agent_settled"]
+
+
 class ContextUsage(TypedDict):
     tokens: int | None
     contextWindow: int
@@ -49,6 +58,11 @@ class SessionStartEvent(TypedDict, total=False):
     type: Literal["session_start"]
     reason: Literal["startup", "reload", "new", "resume", "fork"]
     previousSessionFile: str
+
+
+class SessionInfoChangedEvent(TypedDict, total=False):
+    type: Literal["session_info_changed"]
+    name: str | None
 
 
 class SessionShutdownEvent(TypedDict, total=False):
@@ -168,6 +182,7 @@ class Extension:
     handlers: dict[str, list[HandlerFn]] = field(default_factory=dict)
     tools: dict[str, RegisteredTool] = field(default_factory=dict)
     message_renderers: dict[str, Callable[..., Any]] = field(default_factory=dict)
+    entry_renderers: dict[str, Callable[..., Any]] = field(default_factory=dict)
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
     shortcuts: dict[str, ExtensionShortcut] = field(default_factory=dict)
@@ -244,6 +259,8 @@ class ExtensionAPI(Protocol):
     def register_command(self, name: str, options: dict[str, Any]) -> None: ...
     def register_shortcut(self, shortcut: str, options: dict[str, Any]) -> None: ...
     def register_flag(self, name: str, options: dict[str, Any]) -> None: ...
+    def register_message_renderer(self, custom_type: str, renderer: Any) -> None: ...
+    def register_entry_renderer(self, custom_type: str, renderer: Any) -> None: ...
     def get_flag(self, name: str) -> bool | str | None: ...
     def send_message(
         self, message: dict[str, Any], options: dict[str, Any] | None = None
@@ -255,6 +272,9 @@ class ExtensionAPI(Protocol):
     def set_session_name(self, name: str) -> None: ...
     def get_session_name(self) -> str | None: ...
     def set_label(self, entry_id: str, label: str | None) -> None: ...
+    async def exec(
+        self, command: str, args: list[str], options: dict[str, Any] | None = None
+    ) -> Any: ...
     def get_active_tools(self) -> list[str]: ...
     def get_all_tools(self) -> list[dict[str, Any]]: ...
     def set_active_tools(self, tool_names: list[str]) -> None: ...
@@ -314,6 +334,18 @@ class ExtensionRuntime:
 
 async def _async_false() -> bool:
     return False
+
+
+@dataclass
+class ProjectTrustEvent:
+    type: Literal["project_trust"]
+    cwd: str
+
+
+@dataclass
+class ProjectTrustEventResult:
+    trusted: Literal["yes", "no", "undecided"]
+    remember: bool | None = None
 
 
 @dataclass

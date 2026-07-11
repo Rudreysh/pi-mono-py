@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, cast
 import pi_mono.ai.providers.register_builtins  # noqa: F401
 from pi_mono.ai.api_registry import get_api_provider
 from pi_mono.ai.env_api_keys import get_env_api_key
@@ -53,7 +53,7 @@ def stream(
     api = model.get("api", "")
     provider = _resolve_api_provider(api)
     resolved_options = _with_env_api_key(model, options)
-    return provider.stream(model, context, resolved_options)
+    return cast(AssistantMessageEventStream, provider.stream(model, context, resolved_options))
 
 
 async def complete(
@@ -82,7 +82,9 @@ def stream_simple(
     api = model.get("api", "")
     provider = _resolve_api_provider(api)
     resolved_options = _with_env_api_key(model, options)
-    return provider.stream_simple(model, context, resolved_options)
+    return cast(
+        AssistantMessageEventStream, provider.stream_simple(model, context, resolved_options)
+    )
 
 
 async def complete_simple(

@@ -5,13 +5,22 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from typing import Any, Optional, TypedDict, cast
 
 from pi_mono.ai.env_api_keys import get_env_api_key
-from pi_mono.ai.types import AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions, TextContent
+from pi_mono.ai.types import (
+    AssistantMessage,
+    Context,
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+    TextContent,
+)
 from pi_mono.utils.event_stream import AssistantMessageEventStream
+from pi_mono.utils.shell import track_detached_child_pid, untrack_detached_child_pid
 
 CURSOR_AGENT_DEFAULT_PATH = "agent"
 CURSOR_AGENT_DISCOVERY_TIMEOUT_SECONDS = 15.0
@@ -157,13 +166,30 @@ STATIC_MODELS: list[CursorModelDefinition] = [
     {"id": "grok", "name": "Grok", "reasoning": False, "contextWindow": 131072, "maxTokens": 32768},
 ]
 
-STATIC_MODELS_MAP: dict[str, CursorModelDefinition] = {model["id"]: model for model in STATIC_MODELS}
+STATIC_MODELS_MAP: dict[str, CursorModelDefinition] = {
+    model["id"]: model for model in STATIC_MODELS
+}
 _DISCOVERED_MODELS_CACHE: list[Model] | None = None
+_CACHE_FROM_CLI: bool = False
 _CURSOR_AUTH_CACHE: bool | None = None
 
 
 def resolve_cursor_agent_path() -> str:
-    return os.environ.get("CURSOR_AGENT_PATH") or os.environ.get("AGENT_PATH") or CURSOR_AGENT_DEFAULT_PATH
+    return (
+        os.environ.get("CURSOR_AGENT_PATH")
+        or os.environ.get("AGENT_PATH")
+        or CURSOR_AGENT_DEFAULT_PATH
+    )
+
+
+def check_cursor_agent_available() -> None:
+    path = resolve_cursor_agent_path()
+    if os.path.isabs(path) or os.sep in path or path.startswith("."):
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Cursor Agent CLI not found at {path}")
+        return
+    if shutil.which(path) is None:
+        raise RuntimeError(f"Cursor Agent CLI not found: {path} not on PATH")
 
 
 def _cursor_api_key_from_env() -> str | None:
@@ -248,8 +274,12 @@ def _build_static_models() -> list[Model]:
 
 
 def discover_cursor_models(*, refresh: bool = False) -> list[Model]:
-    global _DISCOVERED_MODELS_CACHE
-    if _DISCOVERED_MODELS_CACHE is not None and not refresh:
+    global _DISCOVERED_MODELS_CACHE, _CACHE_FROM_CLI
+    if (
+        _DISCOVERED_MODELS_CACHE is not None
+        and not refresh
+        and not (_CACHE_FROM_CLI is False and is_cursor_agent_authenticated())
+    ):
         return copy.deepcopy(_DISCOVERED_MODELS_CACHE)
 
     api_key = _cursor_api_key_from_env()
@@ -266,6 +296,7 @@ def discover_cursor_models(*, refresh: bool = False) -> list[Model]:
             parsed = parse_agent_models_output(result.stdout or "")
             if parsed:
                 _DISCOVERED_MODELS_CACHE = [_model_definition_to_model(defn) for defn in parsed]
+                _CACHE_FROM_CLI = True
                 return copy.deepcopy(_DISCOVERED_MODELS_CACHE)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -274,12 +305,14 @@ def discover_cursor_models(*, refresh: bool = False) -> list[Model]:
 
     fallback = _build_static_models()
     _DISCOVERED_MODELS_CACHE = copy.deepcopy(fallback)
+    _CACHE_FROM_CLI = False
     return fallback
 
 
 def refresh_cursor_models_cache() -> None:
-    global _DISCOVERED_MODELS_CACHE
+    global _DISCOVERED_MODELS_CACHE, _CACHE_FROM_CLI
     _DISCOVERED_MODELS_CACHE = None
+    _CACHE_FROM_CLI = False
 
 
 def refresh_cursor_auth_cache() -> None:
@@ -335,6 +368,7 @@ def login_cursor_account_sync() -> None:
 async def login_cursor_account() -> None:
     await asyncio.to_thread(login_cursor_account_sync)
     refresh_cursor_auth_cache()
+    refresh_cursor_models_cache()
 
 
 def logout_cursor_account_sync() -> None:
@@ -362,9 +396,7 @@ def _content_block_to_text(block: dict[str, Any]) -> str:
         data = str(block.get("data", ""))
         mime_type = str(block.get("mimeType", "image/*"))
         approx_bytes = round((len(data) * 3) / 4)
-        return (
-            f"[Image: {mime_type}, ~{approx_bytes} bytes - image input is not supported by the Cursor Agent CLI]"
-        )
+        return f"[Image: {mime_type}, ~{approx_bytes} bytes - image input is not supported by the Cursor Agent CLI]"
     return ""
 
 
@@ -382,7 +414,9 @@ def serialize_context(context: Context) -> str:
             if isinstance(content, str):
                 text = content
             else:
-                text = "\n".join(_content_block_to_text(cast(dict[str, Any], block)) for block in content)
+                text = "\n".join(
+                    _content_block_to_text(cast(dict[str, Any], block)) for block in content
+                )
             lines.append(f"[User]\n{text}")
         elif role == "assistant":
             content = message.get("content", [])
@@ -397,7 +431,9 @@ def serialize_context(context: Context) -> str:
         elif role == "toolResult":
             content = message.get("content", [])
             if isinstance(content, list):
-                text = "\n".join(_content_block_to_text(cast(dict[str, Any], block)) for block in content)
+                text = "\n".join(
+                    _content_block_to_text(cast(dict[str, Any], block)) for block in content
+                )
                 if text.strip():
                     tool_name = str(message.get("toolName", "tool"))
                     lines.append(f"[Tool result: {tool_name}]\n{text}")
@@ -418,7 +454,13 @@ def _build_initial_message(model: Model) -> AssistantMessage:
             "cacheRead": 0,
             "cacheWrite": 0,
             "totalTokens": 0,
-            "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0},
+            "cost": {
+                "input": 0.0,
+                "output": 0.0,
+                "cacheRead": 0.0,
+                "cacheWrite": 0.0,
+                "total": 0.0,
+            },
         },
         "stopReason": "stop",
         "timestamp": int(time.time() * 1000),
@@ -441,9 +483,11 @@ def stream_cursor_cli(
 
     async def run() -> None:
         process: asyncio.subprocess.Process | None = None
+        tracked_pid: int | None = None
         try:
+            check_cursor_agent_available()
             options_dict = dict(options or {})
-            api_key = options_dict.get("apiKey") or _cursor_api_key_from_env()
+            api_key = cast(Optional[str], options_dict.get("apiKey")) or _cursor_api_key_from_env()
             if api_key == "<authenticated>":
                 api_key = None
             workspace_path = os.getcwd()
@@ -471,6 +515,9 @@ def stream_cursor_cli(
                 stderr=asyncio.subprocess.PIPE,
                 env=_agent_env(api_key),
             )
+            if process.pid is not None:
+                tracked_pid = process.pid
+                track_detached_child_pid(tracked_pid)
 
             assert process.stdout is not None
             assert process.stderr is not None
@@ -509,7 +556,11 @@ def stream_cursor_cli(
                         output["content"].append({"type": "text", "text": ""})
                         text_block_index = len(output["content"]) - 1
                         event_stream.push(
-                            {"type": "text_start", "contentIndex": text_block_index, "partial": output}
+                            {
+                                "type": "text_start",
+                                "contentIndex": text_block_index,
+                                "partial": output,
+                            }
                         )
                         text_block_open = True
                     text_block = cast(TextContent, output["content"][text_block_index])
@@ -527,19 +578,31 @@ def stream_cursor_cli(
             stderr_text = ""
             if process.stderr is not None:
                 try:
-                    stderr_text = (await process.stderr.read()).decode("utf-8", errors="ignore").strip()
+                    stderr_text = (
+                        (await process.stderr.read()).decode("utf-8", errors="ignore").strip()
+                    )
                 except Exception:
                     stderr_text = ""
 
             if return_code != 0:
                 error_text = stderr_text or f"Cursor Agent CLI exited with code {return_code}"
-                event_stream.push({"type": "error", "reason": "error", "error": _build_error_message(model, error_text)})
+                event_stream.push(
+                    {
+                        "type": "error",
+                        "reason": "error",
+                        "error": _build_error_message(model, error_text),
+                    }
+                )
                 return
 
             event_stream.push({"type": "done", "reason": "stop", "message": output})
         except Exception as exc:
-            event_stream.push({"type": "error", "reason": "error", "error": _build_error_message(model, str(exc))})
+            event_stream.push(
+                {"type": "error", "reason": "error", "error": _build_error_message(model, str(exc))}
+            )
         finally:
+            if tracked_pid is not None:
+                untrack_detached_child_pid(tracked_pid)
             if process and process.returncode is None:
                 process.terminate()
                 try:

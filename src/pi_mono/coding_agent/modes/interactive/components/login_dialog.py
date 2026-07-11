@@ -117,9 +117,15 @@ class LoginDialogComponent(Container):
             open_browser(verification_uri)
         self._ui.request_render()
 
+    def _create_input_future(self) -> asyncio.Future[str]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        return loop.create_future()
+
     def show_manual_input(self, prompt: str) -> asyncio.Future[str]:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
+        future = self._create_input_future()
         self._content_container.add_child(Spacer(1))
         self._content_container.add_child(Text(theme.fg("dim", prompt), padding_x=1, padding_y=0))
         self._content_container.add_child(self._input)
@@ -145,8 +151,7 @@ class LoginDialogComponent(Container):
         return future
 
     def show_prompt(self, message: str, placeholder: str | None = None) -> asyncio.Future[str]:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
+        future = self._create_input_future()
         self._content_container.add_child(Spacer(1))
         self._content_container.add_child(Text(theme.fg("text", message), padding_x=1, padding_y=0))
         if placeholder:
@@ -210,11 +215,18 @@ class LoginDialogComponent(Container):
         self._content_container.add_child(Text(theme.fg("dim", message), padding_x=1, padding_y=0))
         self._ui.request_render()
 
-    def _submit_input(self) -> None:
+    def _replace_input_with_submitted_text(self, value: str) -> None:
+        self._content_container.children = [
+            Text(f"> {value}", padding_x=1, padding_y=0) if child is self._input else child
+            for child in self._content_container.children
+        ]
+
+    def _submit_input(self, value: str | None = None) -> None:
         if self._input_resolver is None:
             return
-        value = self._input.get_value()
-        self._input_resolver(value)
+        resolved = self._input.get_value() if value is None else value
+        self._replace_input_with_submitted_text(resolved)
+        self._input_resolver(resolved)
         self._input_resolver = None
         self._input_rejecter = None
 

@@ -149,10 +149,13 @@ def calculate_context_tokens(usage: Usage) -> int:
 def get_assistant_usage(msg: AgentMessage) -> dict[str, int] | None:
     if msg.get("role") == "assistant" and "usage" in msg:
         assistant_msg = msg
-        if assistant_msg.get("stopReason") not in ("aborted", "error") and assistant_msg.get(
-            "usage"
+        usage = assistant_msg.get("usage")
+        if (
+            assistant_msg.get("stopReason") not in ("aborted", "error")
+            and usage
+            and calculate_context_tokens(usage) > 0
         ):
-            return assistant_msg["usage"]
+            return usage
     return None
 
 
@@ -208,11 +211,25 @@ class ContextUsageEstimate:
 
 
 def get_last_assistant_usage_info(messages: list[AgentMessage]) -> dict[str, Any] | None:
-    for i in range(len(messages) - 1, -1, -1):
-        usage = get_assistant_usage(messages[i])
-        if usage:
-            return {"usage": usage, "index": i}
-    return None
+    latest_prefix_timestamp = float("-inf")
+    usage_info: dict[str, Any] | None = None
+
+    for i, message in enumerate(messages):
+        if message.get("role") == "assistant":
+            # A newer prefix message was inserted after this response (for example, a
+            # compaction summary), so its usage cannot describe the current prefix.
+            timestamp = message.get("timestamp")
+            usage_applies_to_prefix = (
+                timestamp is not None and timestamp >= latest_prefix_timestamp
+            )
+            usage = get_assistant_usage(message)
+            if usage_applies_to_prefix and usage:
+                usage_info = {"usage": usage, "index": i}
+        msg_timestamp = message.get("timestamp")
+        if msg_timestamp is not None:
+            latest_prefix_timestamp = max(latest_prefix_timestamp, msg_timestamp)
+
+    return usage_info
 
 
 def estimate_text_and_image_content_chars(content: str | list[dict]) -> int:
@@ -226,6 +243,10 @@ def estimate_text_and_image_content_chars(content: str | list[dict]) -> int:
         elif block.get("type") == "image":
             chars += ESTIMATED_IMAGE_CHARS
     return chars
+
+
+def estimate_messages_tokens(messages: list[AgentMessage]) -> int:
+    return sum(estimate_tokens(message) for message in messages)
 
 
 def estimate_tokens(message: AgentMessage) -> int:
@@ -598,7 +619,15 @@ def prepare_compaction(
         )
 
     boundary_end = len(path_entries)
-    tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
+    if path_entries and isinstance(path_entries[0], dict):
+        from pi_mono.core.session_manager import (
+            build_session_context as build_branch_session_context,
+        )
+
+        branch_context = build_branch_session_context(path_entries)
+        tokens_before = estimate_context_tokens(branch_context["messages"]).tokens
+    else:
+        tokens_before = estimate_context_tokens(build_session_context(path_entries).messages).tokens
 
     cut_point = find_cut_point(
         path_entries, boundary_start, boundary_end, settings["keepRecentTokens"]
@@ -624,6 +653,9 @@ def prepare_compaction(
             msg = get_message_from_entry_for_compaction(path_entries[i])
             if msg:
                 turn_prefix_messages.append(msg)
+
+    if not messages_to_summarize and not turn_prefix_messages:
+        return ok(None)
 
     file_ops = extract_file_operations(messages_to_summarize, path_entries, prev_compaction_index)
     if cut_point.is_split_turn:

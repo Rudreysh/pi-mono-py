@@ -108,7 +108,7 @@ def fuzzy_filter(items: List[T], query: str, get_text: Callable[[T], str]) -> Li
     if not trimmed_query:
         return items
 
-    tokens = [t for t in re.split(r"\s+", trimmed_query) if len(t) > 0]
+    tokens = [t for t in re.split(r"[\s/]+", trimmed_query) if len(t) > 0]
     if not tokens:
         return items
 

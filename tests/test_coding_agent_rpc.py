@@ -82,14 +82,26 @@ async def test_rpc_mode_handle_get_state(tmp_path):
 
 @pytest.mark.anyio
 async def test_rpc_mode_handle_get_commands(tmp_path):
-    mode, _session, _runtime = await _make_rpc_mode(tmp_path)
+    mode, session, _runtime = await _make_rpc_mode(tmp_path)
+    session._resource_loader._prompts = [  # type: ignore[attr-defined]
+        {"name": "review", "description": "Review code", "content": "Review"}
+    ]
+    session._resource_loader._skills = [  # type: ignore[attr-defined]
+        {
+            "name": "deploy",
+            "description": "Deploy app",
+            "content": "steps",
+            "filePath": str(tmp_path / "SKILL.md"),
+        }
+    ]
 
     response = await mode.handle_command(parse_rpc_command('{"type":"get_commands"}'))
     assert response is not None
     assert response["success"] is True
     command_names = {item["name"] for item in response["data"]["commands"]}
-    assert "model" in command_names
-    assert "quit" in command_names
+    assert "review" in command_names
+    assert "skill:deploy" in command_names
+    assert "model" not in command_names
 
 
 @pytest.mark.anyio

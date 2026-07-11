@@ -1,25 +1,38 @@
 import os
+import re
 import shutil
-import sys
 import subprocess
-from typing import TypedDict
+import sys
+from typing import Literal, NotRequired, TypedDict
+
 from pi_mono.config import get_bin_dir
 
 
 class ShellConfig(TypedDict):
     shell: str
     args: list[str]
+    commandTransport: NotRequired[Literal["argv", "stdin"]]
+
+
+def _is_legacy_wsl_bash_path(path: str) -> bool:
+    normalized = path.replace("/", "\\").lower()
+    return bool(re.match(r"^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$", normalized))
+
+
+def _get_bash_shell_config(shell: str) -> ShellConfig:
+    if _is_legacy_wsl_bash_path(shell):
+        return {"shell": shell, "args": ["-s"], "commandTransport": "stdin"}
+    return {"shell": shell, "args": ["-c"]}
 
 
 def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
     """Resolve shell configuration based on platform and optional explicit shell path."""
     if custom_shell_path:
         if os.path.exists(custom_shell_path):
-            return {"shell": custom_shell_path, "args": ["-c"]}
+            return _get_bash_shell_config(custom_shell_path)
         raise ValueError(f"Custom shell path not found: {custom_shell_path}")
 
     if sys.platform == "win32":
-        # Try Git Bash in known locations
         paths = []
         program_files = os.environ.get("ProgramFiles")
         if program_files:
@@ -30,14 +43,12 @@ def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
 
         for path in paths:
             if os.path.exists(path):
-                return {"shell": path, "args": ["-c"]}
+                return _get_bash_shell_config(path)
 
-        # Search bash.exe on PATH
         bash_path = shutil.which("bash.exe") or shutil.which("bash")
         if bash_path:
-            return {"shell": bash_path, "args": ["-c"]}
+            return _get_bash_shell_config(bash_path)
 
-        # Raise exception if no bash found on Windows
         raise RuntimeError(
             "No bash shell found. Options:\n"
             "  1. Install Git for Windows\n"
@@ -45,13 +56,12 @@ def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
             "  3. Set shellPath in settings.json"
         )
 
-    # Unix: try /bin/bash, then bash on PATH, then fallback to sh
     if os.path.exists("/bin/bash"):
-        return {"shell": "/bin/bash", "args": ["-c"]}
+        return _get_bash_shell_config("/bin/bash")
 
     bash_path = shutil.which("bash")
     if bash_path:
-        return {"shell": bash_path, "args": ["-c"]}
+        return _get_bash_shell_config(bash_path)
 
     return {"shell": "sh", "args": ["-c"]}
 

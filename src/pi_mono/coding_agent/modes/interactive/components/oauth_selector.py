@@ -74,6 +74,14 @@ class OAuthSelectorComponent(Container):
         self._search_input.focused = value
 
     def _format_status_indicator(self, provider: AuthSelectorProvider) -> str:
+        if provider.id == "cursor":
+            status = self._get_auth_status(provider.id)
+            source = status.get("source")
+            if status.get("configured") and source == "cursor_cli":
+                return theme.fg("success", " ✓ agent logged in")
+            if status.get("configured") and source == "stored":
+                return theme.fg("success", " ✓ configured")
+
         credential = self._auth_storage.get(provider.id)
         if credential and credential.get("type") == provider.auth_type:
             return theme.fg("success", " ✓ configured")

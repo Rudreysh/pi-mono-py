@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -16,6 +15,7 @@ from pi_mono.coding_agent.core.tools.truncate import (
     truncateHead,
     truncateLine,
 )
+from pi_mono.coding_agent.utils.tools_manager import get_tool_path
 
 DEFAULT_LIMIT = 100
 
@@ -113,7 +113,7 @@ async def execute_grep(
     if not os.path.exists(search_path):
         raise FileNotFoundError(f"Path not found: {search_path}")
     effective_limit = max(1, limit or DEFAULT_LIMIT)
-    rg_path = shutil.which("rg")
+    rg_path = get_tool_path("rg")
     output_lines: list[str] = []
     if rg_path:
         args = ["--line-number", "--color=never", "--hidden"]

@@ -31,6 +31,19 @@ def is_paste_marker(segment: str) -> bool:
     return len(segment) >= 10 and PASTE_MARKER_SINGLE.match(segment) is not None
 
 
+@dataclass
+class _IndexedSegment:
+    segment: str
+    index: int
+
+
+def _grapheme_segments_with_index(text: str):
+    index = 0
+    for grapheme in grapheme_segment(text):
+        yield _IndexedSegment(segment=grapheme, index=index)
+        index += len(grapheme)
+
+
 def segment_with_markers(
     text: str,
     base_segmenter,
@@ -39,7 +52,7 @@ def segment_with_markers(
     """A segmenter that merges graphemes that fall within paste markers into single atomic segments."""
     # Fast path: no paste markers in the text or no valid IDs.
     if not valid_ids or "[paste #" not in text:
-        return list(base_segmenter(text))
+        return [seg.segment if hasattr(seg, "segment") else str(seg) for seg in base_segmenter(text)]
 
     # Find all marker spans with valid IDs.
     markers: List[Tuple[int, int]] = []
@@ -50,7 +63,7 @@ def segment_with_markers(
         markers.append((match.start(), match.end()))
 
     if not markers:
-        return list(base_segmenter(text))
+        return [seg.segment if hasattr(seg, "segment") else str(seg) for seg in base_segmenter(text)]
 
     # Build merged segment list.
     base_segments = list(base_segmenter(text))
@@ -58,6 +71,10 @@ def segment_with_markers(
     marker_idx = 0
 
     for seg in base_segments:
+        if isinstance(seg, str):
+            # Should not happen when callers pass indexed segmenters; fall back.
+            result.append(seg)
+            continue
         # Skip past markers that are entirely before this segment.
         while marker_idx < len(markers) and markers[marker_idx][1] <= seg.index:
             marker_idx += 1
@@ -176,6 +193,7 @@ class Editor:
         # History
         self._history: List[str] = []
         self._history_index = -1
+        self._history_draft: EditorState | None = None
 
         # Kill ring
         self._kill_ring = KillRing()
@@ -204,6 +222,11 @@ class Editor:
         return "\n".join(self._state.lines)
 
     def set_text(self, text: str) -> None:
+        self.cancel_autocomplete()
+        self._last_action = None
+        self._history_index = -1
+        self._pastes.clear()
+        self._paste_counter = 0
         lines = text.split("\n")
         self._state.lines = lines if lines else [""]
         self._state.cursor_line = len(self._state.lines) - 1
@@ -211,6 +234,7 @@ class Editor:
         self._scroll_offset = 0
         if self.on_change:
             self.on_change(self.get_text())
+        self.tui.request_render()
 
     def handle_input(self, data: str) -> None:
         """Handle keyboard input - main entry point"""
@@ -239,8 +263,22 @@ class Editor:
         self._insert_text(text)
 
     def get_expanded_text(self) -> str:
-        """Get text with any markers expanded."""
-        return self.get_text()
+        """Get text with paste markers expanded to their actual content."""
+        return self._expand_paste_markers(self.get_text())
+
+    def _expand_paste_markers(self, text: str) -> str:
+        result = text
+        for paste_id, paste_content in self._pastes.items():
+            marker_regex = re.compile(
+                rf"\[paste #{paste_id}( (\+\d+ lines|\d+ chars))?\]"
+            )
+            result = marker_regex.sub(lambda _m, content=paste_content: content, result)
+        return result
+
+    def _segment_line(self, text: str) -> list[str]:
+        return segment_with_markers(
+            text, _grapheme_segments_with_index, set(self._pastes.keys())
+        )
 
     def set_autocomplete_provider(self, provider: Any) -> None:
         self.cancel_autocomplete()
@@ -337,9 +375,7 @@ class Editor:
             if self._autocomplete_state:
                 self._accept_autocomplete()
                 return
-            if self.on_submit:
-                self.on_submit(self.get_text())
-            self._history_index = -1
+            self._submit_value()
             return
 
         if kb.matches(data, "tui.input.tab"):
@@ -354,10 +390,24 @@ class Editor:
             self._move_cursor_right()
             return
         if kb.matches(data, "tui.editor.cursorUp"):
-            self._move_cursor_up()
+            if self._is_on_first_visual_line() and (
+                self._is_editor_empty()
+                or self._history_index > -1
+                or self._state.cursor_col == 0
+            ):
+                self._history_up()
+            elif self._is_on_first_visual_line():
+                self._state.cursor_col = 0
+            else:
+                self._move_cursor_up()
             return
         if kb.matches(data, "tui.editor.cursorDown"):
-            self._move_cursor_down()
+            if self._history_index > -1 and self._is_on_last_visual_line():
+                self._history_down()
+            elif self._is_on_last_visual_line():
+                self._state.cursor_col = len(self._state.lines[self._state.cursor_line])
+            else:
+                self._move_cursor_down()
             return
         if kb.matches(data, "tui.editor.cursorLineStart"):
             self._state.cursor_col = 0
@@ -406,14 +456,6 @@ class Editor:
             self._yank_pop()
             return
 
-        # History
-        if kb.matches(data, "tui.select.up"):
-            self._history_up()
-            return
-        if kb.matches(data, "tui.select.down"):
-            self._history_down()
-            return
-
         # Kitty CSI-u printable
         kitty_printable = decode_printable_key(data)
         if kitty_printable:
@@ -442,6 +484,24 @@ class Editor:
         self._request_autocomplete(force=False, explicit_tab=False)
         self.tui.request_render()
 
+    def _submit_value(self) -> None:
+        self.cancel_autocomplete()
+        result = self._expand_paste_markers(self.get_text()).strip()
+        self._state.lines = [""]
+        self._state.cursor_line = 0
+        self._state.cursor_col = 0
+        self._pastes.clear()
+        self._paste_counter = 0
+        self._history_index = -1
+        self._history_draft = None
+        self._undo_stack.clear()
+        self._last_action = None
+        if self.on_change:
+            self.on_change("")
+        if self.on_submit:
+            self.on_submit(result)
+        self.tui.request_render()
+
     def _backspace(self) -> None:
         """Delete character before cursor"""
         if self._state.cursor_col == 0:
@@ -457,14 +517,38 @@ class Editor:
         else:
             self._push_undo()
             line = self._state.lines[self._state.cursor_line]
-            # Delete grapheme
-            graphemes = list(grapheme_segment(line[: self._state.cursor_col]))
+            before_cursor = line[: self._state.cursor_col]
+            graphemes = self._segment_line(before_cursor)
             if graphemes:
-                grapheme_len = len(graphemes[-1])
+                last = graphemes[-1]
+                grapheme_len = len(last)
+                marker_match = PASTE_MARKER_SINGLE.match(last)
+                if marker_match:
+                    target_id = int(marker_match.group(1))
+                    self._pastes.pop(target_id, None)
+                    self._paste_counter = max(0, self._paste_counter - 1)
+
+                    def renumber(match: re.Match[str]) -> str:
+                        current_id = int(match.group(1))
+                        if current_id <= target_id:
+                            return match.group(0)
+                        suffix = match.group(2) or ""
+                        new_text = f"[paste #{current_id - 1}{suffix}]"
+                        content = self._pastes.pop(current_id, new_text)
+                        self._pastes[current_id - 1] = content
+                        return new_text
+
+                    self._state.lines = [
+                        PASTE_MARKER_REGEX.sub(renumber, current_line)
+                        for current_line in self._state.lines
+                    ]
+                    line = self._state.lines[self._state.cursor_line]
                 self._state.lines[self._state.cursor_line] = (
                     line[: self._state.cursor_col - grapheme_len] + line[self._state.cursor_col :]
                 )
                 self._state.cursor_col -= grapheme_len
+        if self.on_change:
+            self.on_change(self.get_text())
         self.tui.request_render()
 
     def _delete_forward(self) -> None:
@@ -628,8 +712,44 @@ class Editor:
         self._history_index = -1
         self._last_action = None
         self._push_undo()
-        clean_text = pasted_text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+        # Some terminals re-encode control bytes inside bracketed paste as CSI-u.
+        decoded = re.sub(
+            r"\x1b\[(\d+);5u",
+            lambda match: (
+                chr(int(match.group(1)) - 96)
+                if 97 <= int(match.group(1)) <= 122
+                else (
+                    chr(int(match.group(1)) - 64)
+                    if 65 <= int(match.group(1)) <= 90
+                    else match.group(0)
+                )
+            ),
+            pasted_text,
+        )
+        clean_text = decoded.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
         filtered = "".join(char for char in clean_text if char == "\n" or ord(char) >= 32)
+        if re.match(r"^[/~.]", filtered):
+            current_line = self._state.lines[self._state.cursor_line] or ""
+            char_before = (
+                current_line[self._state.cursor_col - 1] if self._state.cursor_col > 0 else ""
+            )
+            if char_before and re.match(r"\w", char_before):
+                filtered = f" {filtered}"
+
+        pasted_lines = filtered.split("\n")
+        total_chars = len(filtered)
+        if len(pasted_lines) > 10 or total_chars > 1000:
+            self._paste_counter += 1
+            paste_id = self._paste_counter
+            self._pastes[paste_id] = filtered
+            marker = (
+                f"[paste #{paste_id} +{len(pasted_lines)} lines]"
+                if len(pasted_lines) > 10
+                else f"[paste #{paste_id} {total_chars} chars]"
+            )
+            self._insert_text(marker)
+            return
+
         if "\n" in filtered:
             parts = filtered.split("\n")
             line = self._state.lines[self._state.cursor_line]
@@ -648,10 +768,6 @@ class Editor:
                 line[: self._state.cursor_col] + filtered + line[self._state.cursor_col :]
             )
             self._state.cursor_col += len(filtered)
-            if self.on_change:
-                self.on_change(self.get_text())
-            self.tui.request_render()
-            return
         if self.on_change:
             self.on_change(self.get_text())
         self.tui.request_render()
@@ -839,7 +955,7 @@ class Editor:
         self._snapped_from_cursor_col = None
         if self._state.cursor_col > 0:
             line = self._state.lines[self._state.cursor_line]
-            graphemes = list(grapheme_segment(line[: self._state.cursor_col]))
+            graphemes = self._segment_line(line[: self._state.cursor_col])
             if graphemes:
                 self._state.cursor_col -= len(graphemes[-1])
 
@@ -847,7 +963,7 @@ class Editor:
         self._snapped_from_cursor_col = None
         line = self._state.lines[self._state.cursor_line]
         if self._state.cursor_col < len(line):
-            graphemes = list(grapheme_segment(line[self._state.cursor_col :]))
+            graphemes = self._segment_line(line[self._state.cursor_col :])
             if graphemes:
                 self._state.cursor_col += len(graphemes[0])
 
@@ -886,11 +1002,35 @@ class Editor:
     # History navigation
     # =========================================================================
 
+    def _is_editor_empty(self) -> bool:
+        return len(self._state.lines) == 1 and self._state.lines[0] == ""
+
+    def _is_on_first_visual_line(self) -> bool:
+        return self._state.cursor_line == 0
+
+    def _is_on_last_visual_line(self) -> bool:
+        return self._state.cursor_line == len(self._state.lines) - 1
+
+    def _copy_editor_state(self) -> EditorState:
+        copied = EditorState()
+        copied.lines = list(self._state.lines)
+        copied.cursor_line = self._state.cursor_line
+        copied.cursor_col = self._state.cursor_col
+        return copied
+
+    def _restore_editor_state(self, state: EditorState) -> None:
+        self._state.lines = list(state.lines)
+        self._state.cursor_line = state.cursor_line
+        self._state.cursor_col = state.cursor_col
+        self._scroll_offset = 0
+        if self.on_change:
+            self.on_change(self.get_text())
+
     def _history_up(self) -> None:
         if not self._history:
             return
         if self._history_index == -1:
-            self._push_undo()
+            self._history_draft = self._copy_editor_state()
         if self._history_index + 1 < len(self._history):
             self._history_index += 1
             self._set_text_internal(self._history[self._history_index])
@@ -898,7 +1038,11 @@ class Editor:
     def _history_down(self) -> None:
         if self._history_index <= 0:
             self._history_index = -1
-            self._set_text_internal("")
+            if self._history_draft is not None:
+                self._restore_editor_state(self._history_draft)
+                self._history_draft = None
+            else:
+                self._set_text_internal("")
         else:
             self._history_index -= 1
             self._set_text_internal(self._history[self._history_index])

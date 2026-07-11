@@ -146,6 +146,29 @@ def safe_json_stringify(value: Any) -> str:
         return str(value)
 
 
+def should_use_prompt_caching(options: Optional[MistralOptions]) -> bool:
+    options_dict = options or {}
+    return options_dict.get("cacheRetention") != "none" and bool(options_dict.get("sessionId"))
+
+
+def get_mistral_cached_prompt_tokens(usage: Any, prompt_tokens: int) -> int:
+    raw_usage = usage if isinstance(usage, dict) else {}
+    details = raw_usage.get("promptTokensDetails") or raw_usage.get("prompt_tokens_details") or {}
+    alt_details = raw_usage.get("promptTokenDetails") or raw_usage.get("prompt_token_details") or {}
+    raw_cached = (
+        (details.get("cachedTokens") if isinstance(details, dict) else None)
+        or (details.get("cached_tokens") if isinstance(details, dict) else None)
+        or (alt_details.get("cachedTokens") if isinstance(alt_details, dict) else None)
+        or (alt_details.get("cached_tokens") if isinstance(alt_details, dict) else None)
+        or raw_usage.get("numCachedTokens")
+        or raw_usage.get("num_cached_tokens")
+        or 0
+    )
+    cached_tokens = raw_cached if isinstance(raw_cached, (int, float)) else 0
+    cached_int = int(cached_tokens)
+    return min(prompt_tokens, max(0, cached_int))
+
+
 def build_request_options(model: Model, options: Optional[MistralOptions] = None) -> Dict[str, Any]:
     """Resolves affinity routing headers and custom timeouts for Mistral requests."""
     options_dict = options or {}
@@ -155,8 +178,8 @@ def build_request_options(model: Model, options: Optional[MistralOptions] = None
     if options_dict.get("headers"):
         headers.update(options_dict["headers"])
 
-    if options_dict.get("sessionId") and "x-affinity" not in headers:
-        headers["x-affinity"] = options_dict["sessionId"]
+    if should_use_prompt_caching(options_dict) and "x-affinity" not in headers:
+        headers["x-affinity"] = str(options_dict["sessionId"])
 
     res: Dict[str, Any] = {}
     if headers:
@@ -421,6 +444,8 @@ def build_chat_payload(
         payload["prompt_mode"] = options_dict["promptMode"]
     if options_dict.get("reasoningEffort"):
         payload["reasoning_effort"] = options_dict["reasoningEffort"]
+    if should_use_prompt_caching(options_dict):
+        payload["prompt_cache_key"] = options_dict.get("sessionId")
 
     system_prompt = context.get("systemPrompt")
     if system_prompt:
@@ -486,9 +511,12 @@ async def consume_chat_stream(
 
         usage = safe_get(chunk, "usage")
         if usage:
-            output_dict["usage"]["input"] = safe_get(usage, "prompt_tokens") or 0
+            prompt_tokens = safe_get(usage, "prompt_tokens") or 0
+            output_dict["usage"]["input"] = prompt_tokens
             output_dict["usage"]["output"] = safe_get(usage, "completion_tokens") or 0
-            output_dict["usage"]["cacheRead"] = 0
+            output_dict["usage"]["cacheRead"] = get_mistral_cached_prompt_tokens(
+                usage, prompt_tokens
+            )
             output_dict["usage"]["cacheWrite"] = 0
             output_dict["usage"]["totalTokens"] = safe_get(usage, "total_tokens") or (
                 output_dict["usage"]["input"] + output_dict["usage"]["output"]
@@ -689,11 +717,8 @@ def stream_mistral(
                 model.get("baseUrl") or "https://api.mistral.ai"
             )
             if proxy_config:
-                proxies = {
-                    "http://": proxy_config.get("http"),
-                    "https://": proxy_config.get("https"),
-                }
-                http_client = httpx.AsyncClient(proxies=proxies)
+                proxy_url = proxy_config.get("https") or proxy_config.get("http")
+                http_client = httpx.AsyncClient(proxy=proxy_url)
             else:
                 http_client = None
 
@@ -784,7 +809,7 @@ def stream_simple_mistral(
     if not api_key:
         raise ValueError(f"No API key for provider: {model.get('provider')}")
 
-    base = build_base_options(model, options_dict, api_key)
+    base = build_base_options(model, context, options_dict, api_key)
 
     reasoning_opt = options_dict.get("reasoning")
     clamped_reasoning = (

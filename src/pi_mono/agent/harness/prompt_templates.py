@@ -281,6 +281,26 @@ def substitute_args(content: str, args: list[str]) -> str:
     return result
 
 
+def expand_prompt_template(text: str, templates: list[PromptTemplate]) -> str:
+    """Expand a /template invocation or return the original text."""
+    if not text.startswith("/"):
+        return text
+
+    import re
+
+    match = re.match(r"^/([^\s]+)(?:\s+([\s\S]*))?$", text)
+    if not match:
+        return text
+
+    template_name = match.group(1)
+    args_string = match.group(2) or ""
+    template = next((item for item in templates if item.name == template_name), None)
+    if template is None:
+        return text
+
+    return substitute_args(template.content, parse_command_args(args_string))
+
+
 def format_prompt_template_invocation(template: PromptTemplate, args: list[str] = []) -> str:
     """Format a prompt template invocation with positional arguments."""
     return substitute_args(template.content, args)

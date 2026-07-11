@@ -9,8 +9,10 @@ Ported from TypeScript's tui.ts - the main terminal UI engine managing:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Literal, Optional, Protocol, Set, Union
@@ -22,6 +24,12 @@ from .terminal_image import (
     get_capabilities,
     is_image_line,
     set_cell_dimensions,
+)
+from .terminal_colors import (
+    TerminalColorScheme,
+    is_osc11_background_color_response,
+    parse_osc11_background_color,
+    parse_terminal_color_scheme_report,
 )
 from .utils import (
     extract_segments,
@@ -35,6 +43,13 @@ from .utils import (
 
 KITTY_SEQUENCE_PREFIX = "\x1b_G"
 CURSOR_MARKER = "\x1b_pi:c\x07"
+
+
+@dataclass
+class _PendingOsc11BackgroundQuery:
+    settled: bool
+    future: asyncio.Future[Any]
+    timer: Any | None
 
 
 def extract_kitty_image_ids(line: str) -> List[int]:
@@ -139,7 +154,7 @@ def parse_size_value(value: Optional[SizeValue], reference_size: int) -> Optiona
         return value
     # Parse percentage string like "50%"
     if isinstance(value, str):
-        match = value.match(r"^(\d+(?:\.\d+)?)%$")
+        match = re.match(r"^(\d+(?:\.\d+)?)%$", value)
         if match:
             return int((reference_size * float(match.group(1))) / 100)
     return None
@@ -183,32 +198,16 @@ class OverlayUnfocusOptions:
     target: Optional[Component] = None
 
 
-class OverlayHandle(Protocol):
+@dataclass
+class OverlayHandle:
     """Handle returned by show_overlay for controlling the overlay."""
 
-    def hide(self) -> None:
-        """Permanently remove the overlay."""
-        ...
-
-    def set_hidden(self, hidden: bool) -> None:
-        """Temporarily hide or show the overlay."""
-        ...
-
-    def is_hidden(self) -> bool:
-        """Check if overlay is temporarily hidden."""
-        ...
-
-    def focus(self) -> None:
-        """Focus this overlay and bring it to the visual front."""
-        ...
-
-    def unfocus(self, options: Optional[OverlayUnfocusOptions] = None) -> None:
-        """Release focus to the next visible capturing overlay."""
-        ...
-
-    def is_focused(self) -> bool:
-        """Check if this overlay currently has focus."""
-        ...
+    hide: Callable[[], None]
+    set_hidden: Callable[[bool], None]
+    is_hidden: Callable[[], bool]
+    focus: Callable[[], None]
+    unfocus: Callable[[Optional[OverlayUnfocusOptions]], None]
+    is_focused: Callable[[], bool]
 
 
 @dataclass
@@ -372,6 +371,11 @@ class TUI(Container):
             EligibleOverlayFocusRestoreState,
             BlockedOverlayFocusRestoreState,
         ] = "inactive"
+
+        self.terminal_color_scheme_notifications_enabled = False
+        self.terminal_color_scheme_listeners: Set[Callable[[TerminalColorScheme], None]] = set()
+        self._pending_osc11_background_replies = 0
+        self._pending_osc11_background_queries: List[_PendingOsc11BackgroundQuery] = []
 
     @property
     def full_redraws(self) -> int:
@@ -728,6 +732,8 @@ class TUI(Container):
             lambda: self.request_render(),
         )
         self.terminal.hideCursor()
+        if self.terminal_color_scheme_notifications_enabled:
+            self.terminal.write("\x1b[?2031h")
         self.query_cell_size()
         self.request_render()
 
@@ -737,6 +743,65 @@ class TUI(Container):
 
     def remove_input_listener(self, listener: Callable[[str], Optional[dict]]) -> None:
         self.input_listeners.discard(listener)
+
+    def on_terminal_color_scheme_change(
+        self, listener: Callable[[TerminalColorScheme], None]
+    ) -> Callable[[], None]:
+        self.terminal_color_scheme_listeners.add(listener)
+        return lambda: self.terminal_color_scheme_listeners.discard(listener)
+
+    def set_terminal_color_scheme_notifications(self, enabled: bool) -> None:
+        if self.terminal_color_scheme_notifications_enabled == enabled:
+            return
+        self.terminal_color_scheme_notifications_enabled = enabled
+        if not self.stopped:
+            self.terminal.write("\x1b[?2031h" if enabled else "\x1b[?2031l")
+
+    async def query_terminal_background_color(self, *, timeout_ms: int = 100) -> Any | None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        query = _PendingOsc11BackgroundQuery(settled=False, future=future, timer=None)
+
+        def settle(value: Any | None) -> None:
+            if query.settled:
+                return
+            query.settled = True
+            if query.timer is not None:
+                query.timer.cancel()
+                query.timer = None
+            if not future.done():
+                future.set_result(value)
+
+        query.timer = loop.call_later(timeout_ms / 1000, lambda: settle(None))
+        self._pending_osc11_background_queries.append(query)
+        self._pending_osc11_background_replies += 1
+        self.terminal.write("\x1b]11;?\x07")
+        return await future
+
+    async def query_terminal_color_scheme(
+        self, *, timeout_ms: int = 100
+    ) -> TerminalColorScheme | None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[TerminalColorScheme | None] = loop.create_future()
+        settled = False
+        timer: Any | None = None
+
+        def settle(scheme: TerminalColorScheme | None) -> None:
+            nonlocal settled, timer
+            if settled:
+                return
+            settled = True
+            if timer is not None:
+                timer.cancel()
+                timer = None
+            unsubscribe()
+            if not future.done():
+                future.set_result(scheme)
+
+        unsubscribe = self.on_terminal_color_scheme_change(settle)
+        timer = loop.call_later(timeout_ms / 1000, lambda: settle(None))
+        self.terminal.write("\x1b[?996n")
+        return await future
 
     def query_cell_size(self) -> None:
         if not get_capabilities().images:
@@ -748,6 +813,9 @@ class TUI(Container):
         if self.render_timer:
             self.render_timer.cancel()
             self.render_timer = None
+
+        if self.terminal_color_scheme_notifications_enabled:
+            self.terminal.write("\x1b[?2031l")
 
         if self.previous_lines:
             target_row = len(self.previous_lines)
@@ -761,9 +829,28 @@ class TUI(Container):
         self.terminal.showCursor()
         self.terminal.stop()
 
+    async def drain_input(self, max_ms: int = 1000, idle_ms: int = 50) -> None:
+        drain = getattr(self.terminal, "drainInput", None) or getattr(
+            self.terminal, "drain_input", None
+        )
+        if drain is None:
+            return
+        result = drain(max_ms, idle_ms)
+        if asyncio.iscoroutine(result):
+            await result
+
     # =========================================================================
     # Rendering
     # =========================================================================
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop | None:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return asyncio.get_event_loop()
+            except RuntimeError:
+                return None
 
     def request_render(self, force: bool = False) -> None:
         if force:
@@ -779,17 +866,17 @@ class TUI(Container):
                 self.render_timer = None
             self.render_requested = True
             # Schedule on next event loop iteration
-            import asyncio
-
-            asyncio.get_event_loop().call_soon(self._do_render_now)
+            loop = self._get_loop()
+            if loop is not None:
+                loop.call_soon(self._do_render_now)
             return
 
         if self.render_requested:
             return
         self.render_requested = True
-        import asyncio
-
-        asyncio.get_event_loop().call_soon(self._schedule_render)
+        loop = self._get_loop()
+        if loop is not None:
+            loop.call_soon(self._schedule_render)
 
     def _schedule_render(self) -> None:
         if self.stopped or self.render_timer or not self.render_requested:
@@ -797,9 +884,9 @@ class TUI(Container):
         elapsed = (time.perf_counter() - self.last_render_at) * 1000
         delay = max(0, self.MIN_RENDER_INTERVAL_MS - elapsed) / 1000.0
 
-        import asyncio
-
-        self.render_timer = asyncio.get_event_loop().call_later(delay, self._do_render_now)
+        loop = self._get_loop()
+        if loop is not None:
+            self.render_timer = loop.call_later(delay, self._do_render_now)
 
     def _do_render_now(self) -> None:
         self.render_timer = None
@@ -813,6 +900,11 @@ class TUI(Container):
             self._schedule_render()
 
     def handle_input(self, data: str) -> None:
+        if self._consume_osc11_background_response(data):
+            return
+        if self._consume_terminal_color_scheme_report(data):
+            return
+
         if self.input_listeners:
             current = data
             for listener in self.input_listeners:
@@ -866,6 +958,36 @@ class TUI(Container):
                 return
             self.focused_component.handle_input(data)
             self.request_render()
+
+    def _consume_osc11_background_response(self, data: str) -> bool:
+        if self._pending_osc11_background_replies <= 0:
+            return False
+        if not is_osc11_background_color_response(data):
+            return False
+
+        rgb = parse_osc11_background_color(data)
+        self._pending_osc11_background_replies -= 1
+        query = (
+            self._pending_osc11_background_queries.pop(0)
+            if self._pending_osc11_background_queries
+            else None
+        )
+        if query is not None and not query.settled:
+            query.settled = True
+            if query.timer is not None:
+                query.timer.cancel()
+                query.timer = None
+            if not query.future.done():
+                query.future.set_result(rgb)
+        return True
+
+    def _consume_terminal_color_scheme_report(self, data: str) -> bool:
+        scheme = parse_terminal_color_scheme_report(data)
+        if scheme is None:
+            return False
+        for listener in list(self.terminal_color_scheme_listeners):
+            listener(scheme)
+        return True
 
     def consume_cell_size_response(self, data: str) -> bool:
         import re

@@ -21,6 +21,56 @@ COPILOT_HEADERS = {
     "Editor-Plugin-Version": "copilot-chat/0.35.0",
     "Copilot-Integration-Id": "vscode-chat",
 }
+COPILOT_API_VERSION = "2026-06-01"
+
+
+def _as_record(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def is_selectable_copilot_model(item: dict[str, Any]) -> bool:
+    policy = _as_record(item.get("policy"))
+    capabilities = _as_record(item.get("capabilities"))
+    supports = _as_record(capabilities.get("supports")) if capabilities else None
+    return (
+        item.get("model_picker_enabled") is True
+        and (policy or {}).get("state") != "disabled"
+        and (supports or {}).get("tool_calls") is not False
+    )
+
+
+def parse_available_copilot_model_ids(raw: Any) -> list[str]:
+    data = _as_record(raw)
+    if data is None or not isinstance(data.get("data"), list):
+        raise RuntimeError("Invalid Copilot models response")
+    ids: list[str] = []
+    for raw_item in data["data"]:
+        item = _as_record(raw_item)
+        model_id = item.get("id") if item else None
+        if isinstance(model_id, str) and item and is_selectable_copilot_model(item):
+            ids.append(model_id)
+    return ids
+
+
+async def fetch_available_github_copilot_model_ids(
+    copilot_token: str,
+    enterprise_domain: str | None = None,
+) -> list[str]:
+    base_url = get_github_copilot_base_url(copilot_token, enterprise_domain)
+    raw = await _fetch_json(
+        f"{base_url}/models",
+        {
+            "method": "GET",
+            "headers": {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {copilot_token}",
+                **COPILOT_HEADERS,
+                "X-GitHub-Api-Version": COPILOT_API_VERSION,
+            },
+            "timeout": 5.0,
+        },
+    )
+    return parse_available_copilot_model_ids(raw)
 
 
 def normalize_domain(input_value: str) -> str | None:
@@ -70,7 +120,8 @@ def get_github_copilot_base_url(
 
 
 async def _fetch_json(url: str, init: dict[str, Any]) -> Any:
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    timeout = init.pop("timeout", 30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.request(url=url, **init)
         if not response.is_success:
             raise RuntimeError(f"{response.status_code} {response.reason_phrase}: {response.text}")
@@ -149,11 +200,14 @@ class _PollOptions:
         expires_in_seconds: int,
         poll: Callable[[], Any],
         signal: Any | None = None,
+        *,
+        wait_before_first_poll: bool = False,
     ) -> None:
         self.intervalSeconds = interval_seconds
         self.expiresInSeconds = expires_in_seconds
         self.poll = poll
         self.signal = signal
+        self.waitBeforeFirstPoll = wait_before_first_poll
 
 
 async def _poll_for_github_access_token(
@@ -192,14 +246,24 @@ async def _poll_for_github_access_token(
             if error == "authorization_pending":
                 return {"status": "pending"}
             if error == "slow_down":
-                return {"status": "slow_down"}
+                interval = raw.get("interval")
+                result: dict[str, Any] = {"status": "slow_down"}
+                if isinstance(interval, (int, float)) and interval > 0:
+                    result["intervalSeconds"] = int(interval)
+                return result
             suffix = f": {description}" if description else ""
             return {"status": "failed", "message": f"Device flow failed: {error}{suffix}"}
 
         return {"status": "failed", "message": "Invalid device token response"}
 
     return await poll_oauth_device_code_flow(
-        _PollOptions(device.interval, device.expires_in, poll, signal)
+        _PollOptions(
+            device.interval,
+            device.expires_in,
+            poll,
+            signal,
+            wait_before_first_poll=True,
+        )
     )
 
 
@@ -326,6 +390,9 @@ async def login_github_copilot(
     if on_progress:
         on_progress("Enabling models...")
     await _enable_all_github_copilot_models(credentials["access"], enterprise_domain)
+    credentials["availableModelIds"] = await fetch_available_github_copilot_model_ids(
+        credentials["access"], enterprise_domain
+    )
     return credentials
 
 
@@ -366,10 +433,17 @@ class GitHubCopilotOAuthProvider:
         enterprise_url = credentials.get("enterpriseUrl")
         domain = normalize_domain(enterprise_url) if enterprise_url else None
         base_url = get_github_copilot_base_url(credentials["access"], domain)
-        return [
-            {**model, "baseUrl": base_url} if model.get("provider") == "github-copilot" else model
-            for model in models
-        ]
+        available_model_ids = credentials.get("availableModelIds")
+        available_set = set(available_model_ids) if isinstance(available_model_ids, list) else None
+        result: list[Model] = []
+        for model in models:
+            if model.get("provider") != "github-copilot":
+                result.append(model)
+                continue
+            if available_set is not None and model.get("id") not in available_set:
+                continue
+            result.append({**model, "baseUrl": base_url})
+        return result
 
 
 github_copilot_oauth_provider = GitHubCopilotOAuthProvider()

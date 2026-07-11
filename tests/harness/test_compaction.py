@@ -1,7 +1,7 @@
 import pytest
 import time
 import copy
-from typing import Optional
+from typing import Any, Optional
 from pi_mono.ai.types import Usage
 from pi_mono.ai.providers.faux import (
     register_faux_provider,
@@ -401,7 +401,12 @@ def test_prepares_compaction_using_the_latest_compaction_summary_as_previousSumm
     )
 
     path_entries = [u1, a1, u2, a2, compaction1, u3, a3]
-    prep_res = prepare_compaction(path_entries, DEFAULT_COMPACTION_SETTINGS)
+    compaction_settings = {
+        "enabled": True,
+        "reserveTokens": 100,
+        "keepRecentTokens": 1,
+    }
+    prep_res = prepare_compaction(path_entries, compaction_settings)
     assert prep_res.ok is True
     preparation = prep_res.value
     assert preparation is not None
@@ -702,22 +707,47 @@ async def test_returns_turn_prefix_compaction_errors_without_throwing(cleanup_fa
 
 @pytest.mark.anyio
 async def test_returns_a_compaction_result_with_file_details(cleanup_faux):
-    u1 = create_message_entry(create_user_message("read a file"))
-    assistant_message = create_assistant_message("calling tool")
+    entries: list[Any] = []
+    parent_id: str | None = None
+    for index in range(4):
+        user = create_message_entry(create_user_message(f"user {index}"), parent_id)
+        assistant = create_message_entry(
+            create_assistant_message(f"assistant {index}", create_mock_usage(5000, 1000)),
+            user.id,
+        )
+        entries.extend([user, assistant])
+        parent_id = assistant.id
+
+    assistant_message = create_assistant_message("calling tool", create_mock_usage(5000, 1000))
     assistant_message["content"] = [
         {"type": "toolCall", "id": "tool-1", "name": "read", "arguments": {"path": "src/index.ts"}}
     ]
-    a1 = create_message_entry(assistant_message, u1.id)
-    u2 = create_message_entry(create_user_message("continue"), a1.id)
-    a2 = create_message_entry(create_assistant_message("done"), u2.id)
+    tool_user = create_message_entry(create_user_message("read a file"), parent_id)
+    tool_assistant = create_message_entry(assistant_message, tool_user.id)
+    follow_up_user = create_message_entry(create_user_message("continue"), tool_assistant.id)
+    follow_up_assistant = create_message_entry(
+        create_assistant_message("done", create_mock_usage(5000, 1000)),
+        follow_up_user.id,
+    )
+    entries.extend([tool_user, tool_assistant, follow_up_user, follow_up_assistant])
 
-    prep_res = prepare_compaction([u1, a1, u2, a2], DEFAULT_COMPACTION_SETTINGS)
+    compaction_settings = {
+        "enabled": True,
+        "reserveTokens": 100,
+        "keepRecentTokens": 1,
+    }
+    prep_res = prepare_compaction(entries, compaction_settings)
     assert prep_res.ok is True
     preparation = prep_res.value
     assert preparation is not None
 
     faux, model = create_faux_model(cleanup_faux, reasoning=False)
-    faux.set_responses([faux_assistant_message("## Goal\nTest summary")])
+    faux.set_responses(
+        [
+            faux_assistant_message("## Goal\nTest summary"),
+            faux_assistant_message("## Prefix\nPrefix summary"),
+        ]
+    )
 
     comp_res = await compact(preparation, model, "test-key")
     assert comp_res.ok is True

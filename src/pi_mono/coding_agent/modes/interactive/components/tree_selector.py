@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pi_mono.coding_agent.modes.interactive.components.dynamic_border import DynamicBorder
 from pi_mono.coding_agent.modes.interactive.components.keybinding_hints import (
@@ -20,6 +20,14 @@ from pi_mono.tui.keybindings import get_keybindings
 from pi_mono.tui.tui import Container, TUI
 
 _NAVIGABLE_TYPES = frozenset({"message", "compaction", "branch_summary"})
+TreeFilterMode = Literal["default", "no-tools", "user-only", "labeled-only", "all"]
+_TREE_FILTER_MODES: tuple[TreeFilterMode, ...] = (
+    "default",
+    "no-tools",
+    "user-only",
+    "labeled-only",
+    "all",
+)
 
 
 @dataclass(frozen=True)
@@ -101,6 +109,28 @@ def flatten_branch_entries(
     return items
 
 
+def apply_tree_filter_mode(
+    items: list[BranchListItem],
+    mode: TreeFilterMode,
+    *,
+    labels_by_id: dict[str, str] | None = None,
+) -> list[BranchListItem]:
+    labels = labels_by_id or {}
+    if mode == "default":
+        return list(items)
+    if mode == "user-only":
+        return [item for item in items if item.description == "user"]
+    if mode == "labeled-only":
+        return [item for item in items if labels.get(item.entry_id)]
+    if mode == "no-tools":
+        return [
+            item
+            for item in items
+            if item.entry_type != "message" or item.description != "toolResult"
+        ]
+    return list(items)
+
+
 def filter_branch_entries(items: list[BranchListItem], query: str) -> list[BranchListItem]:
     """Filter branch list items by a search query."""
     trimmed = query.strip()
@@ -124,12 +154,17 @@ class TreeSelectorComponent(Container):
         on_cancel: Callable[[], None],
         *,
         initial_search: str | None = None,
+        initial_filter_mode: TreeFilterMode = "default",
+        on_filter_mode_change: Callable[[TreeFilterMode], None] | None = None,
     ) -> None:
         super().__init__()
         self._ui = ui
         self._session_manager = session_manager
         self._on_select = on_select
         self._on_cancel = on_cancel
+        self._filter_mode = initial_filter_mode
+        self._on_filter_mode_change = on_filter_mode_change
+        self._labels_by_id: dict[str, str] = {}
         self._all_items: list[BranchListItem] = []
         self._filtered_items: list[BranchListItem] = []
 
@@ -183,12 +218,17 @@ class TreeSelectorComponent(Container):
 
     def _reload_items(self) -> None:
         branch = self._session_manager.get_branch()
-        labels_by_id = getattr(self._session_manager, "labels_by_id", {})
+        self._labels_by_id = dict(getattr(self._session_manager, "labels_by_id", {}) or {})
         current_leaf_id = self._session_manager.get_leaf_id()
-        self._all_items = flatten_branch_entries(
+        items = flatten_branch_entries(
             branch,
-            labels_by_id=labels_by_id,
+            labels_by_id=self._labels_by_id,
             current_leaf_id=current_leaf_id,
+        )
+        self._all_items = apply_tree_filter_mode(
+            items,
+            self._filter_mode,
+            labels_by_id=self._labels_by_id,
         )
         self._filtered_items = list(self._all_items)
         current_index = next(
@@ -227,8 +267,40 @@ class TreeSelectorComponent(Container):
     def _handle_select_item(self, item: SelectItem) -> None:
         self._on_select(item.value)
 
+    def _set_filter_mode(self, mode: TreeFilterMode) -> None:
+        self._filter_mode = mode
+        if self._on_filter_mode_change is not None:
+            self._on_filter_mode_change(mode)
+        self._reload_items()
+        self._apply_filter(self._search_input.get_value())
+
     def handle_input(self, data: str) -> None:
         kb = get_keybindings()
+        if kb.matches(data, "app.tree.filter.default"):
+            self._set_filter_mode("default")
+            return
+        if kb.matches(data, "app.tree.filter.noTools"):
+            self._set_filter_mode("default" if self._filter_mode == "no-tools" else "no-tools")
+            return
+        if kb.matches(data, "app.tree.filter.userOnly"):
+            self._set_filter_mode("default" if self._filter_mode == "user-only" else "user-only")
+            return
+        if kb.matches(data, "app.tree.filter.labeledOnly"):
+            self._set_filter_mode(
+                "default" if self._filter_mode == "labeled-only" else "labeled-only"
+            )
+            return
+        if kb.matches(data, "app.tree.filter.all"):
+            self._set_filter_mode("default" if self._filter_mode == "all" else "all")
+            return
+        if kb.matches(data, "app.tree.filter.cycleForward"):
+            current_index = _TREE_FILTER_MODES.index(self._filter_mode)
+            self._set_filter_mode(_TREE_FILTER_MODES[(current_index + 1) % len(_TREE_FILTER_MODES)])
+            return
+        if kb.matches(data, "app.tree.filter.cycleBackward"):
+            current_index = _TREE_FILTER_MODES.index(self._filter_mode)
+            self._set_filter_mode(_TREE_FILTER_MODES[(current_index - 1) % len(_TREE_FILTER_MODES)])
+            return
         if kb.matches(data, "tui.select.up") or kb.matches(data, "tui.select.down"):
             self._select_list.handle_input(data)
             return

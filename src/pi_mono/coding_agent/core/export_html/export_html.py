@@ -5,12 +5,30 @@ from __future__ import annotations
 import base64
 import html
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pi_mono.config import APP_NAME, get_export_template_dir
 from pi_mono.core.session_manager import SessionManager
+from pi_mono.coding_agent.core.export_html.tool_renderer import ToolHtmlRenderer
 from pi_mono.utils.paths import normalize_path, resolve_path
+
+TEMPLATE_RENDERED_TOOLS = frozenset({"bash", "read", "write", "edit", "ls"})
+
+
+@dataclass
+class ExportOptions:
+    output_path: str | None = None
+    theme_name: str | None = None
+    tool_renderer: ToolHtmlRenderer | None = None
+
+
+@dataclass
+class RenderedToolHtml:
+    call_html: str | None = None
+    result_html_collapsed: str | None = None
+    result_html_expanded: str | None = None
 
 
 def _escape(text: str) -> str:
@@ -140,13 +158,83 @@ def _generate_minimal_html(session_data: dict[str, Any]) -> str:
 
 
 def _build_session_data_from_manager(session_manager: SessionManager) -> dict[str, Any]:
-    entries = session_manager.get_entries()
-    header = next((entry for entry in entries if entry.get("type") == "session"), None)
     return {
-        "header": header,
-        "entries": entries,
-        "leafId": session_manager.leafId,
+        "header": session_manager.get_header(),
+        "entries": session_manager.get_entries(),
+        "leafId": session_manager.get_leaf_id(),
     }
+
+
+def _serialize_rendered_tools(
+    rendered_tools: dict[str, RenderedToolHtml],
+) -> dict[str, dict[str, str | None]]:
+    payload: dict[str, dict[str, str | None]] = {}
+    for tool_call_id, rendered in rendered_tools.items():
+        entry: dict[str, str | None] = {}
+        if rendered.call_html:
+            entry["callHtml"] = rendered.call_html
+        if rendered.result_html_collapsed:
+            entry["resultHtmlCollapsed"] = rendered.result_html_collapsed
+        if rendered.result_html_expanded:
+            entry["resultHtmlExpanded"] = rendered.result_html_expanded
+        if entry:
+            payload[tool_call_id] = entry
+    return payload
+
+
+def pre_render_tools(
+    entries: list[dict[str, Any]],
+    tool_renderer: ToolHtmlRenderer,
+) -> dict[str, RenderedToolHtml]:
+    rendered_tools: dict[str, RenderedToolHtml] = {}
+
+    for entry in entries:
+        if entry.get("type") != "message":
+            continue
+        message = entry.get("message") or {}
+        role = message.get("role")
+
+        if role == "assistant":
+            for block in message.get("content", []):
+                if block.get("type") != "toolCall":
+                    continue
+                tool_name = str(block.get("name", ""))
+                if tool_name in TEMPLATE_RENDERED_TOOLS:
+                    continue
+                call_html = tool_renderer.render_call(
+                    str(block.get("id", "")),
+                    tool_name,
+                    block.get("arguments", {}),
+                )
+                if call_html:
+                    tool_call_id = str(block.get("id", ""))
+                    rendered_tools.setdefault(tool_call_id, RenderedToolHtml()).call_html = (
+                        call_html
+                    )
+
+        if role == "toolResult":
+            tool_call_id = str(message.get("toolCallId", ""))
+            if not tool_call_id:
+                continue
+            tool_name = str(message.get("toolName", ""))
+            existing = rendered_tools.get(tool_call_id)
+            if not existing and tool_name in TEMPLATE_RENDERED_TOOLS:
+                continue
+            rendered = tool_renderer.render_result(
+                tool_call_id,
+                tool_name,
+                list(message.get("content", [])),
+                message.get("details"),
+                bool(message.get("isError")),
+            )
+            if rendered:
+                current = rendered_tools.setdefault(tool_call_id, RenderedToolHtml())
+                if rendered.get("collapsed"):
+                    current.result_html_collapsed = rendered["collapsed"]
+                if rendered.get("expanded"):
+                    current.result_html_expanded = rendered["expanded"]
+
+    return rendered_tools
 
 
 def generate_html(session_data: dict[str, Any], theme_name: str | None = None) -> str:
@@ -155,14 +243,59 @@ def generate_html(session_data: dict[str, Any], theme_name: str | None = None) -
     return _generate_minimal_html(session_data)
 
 
+def _resolve_export_options(
+    output_path: str | None = None,
+    *,
+    theme_name: str | None = None,
+    tool_renderer: ToolHtmlRenderer | None = None,
+    options: ExportOptions | str | None = None,
+) -> ExportOptions:
+    if isinstance(options, str):
+        return ExportOptions(
+            output_path=options, theme_name=theme_name, tool_renderer=tool_renderer
+        )
+    if options is not None:
+        return options
+    return ExportOptions(
+        output_path=output_path,
+        theme_name=theme_name,
+        tool_renderer=tool_renderer,
+    )
+
+
+def _attach_rendered_tools(
+    session_data: dict[str, Any],
+    tool_renderer: ToolHtmlRenderer | None,
+) -> None:
+    if tool_renderer is None:
+        return
+    rendered = pre_render_tools(session_data.get("entries", []), tool_renderer)
+    serialized = _serialize_rendered_tools(rendered)
+    if serialized:
+        session_data["renderedTools"] = serialized
+
+
 def export_session_to_html(
     session: Any,
     output_path: str | None = None,
     *,
     theme_name: str | None = None,
+    tool_renderer: ToolHtmlRenderer | None = None,
+    options: ExportOptions | None = None,
 ) -> str:
-    session_data = _build_session_data_from_manager(session.session_manager)
-    session_data["systemPrompt"] = session.system_prompt
+    opts = _resolve_export_options(
+        output_path,
+        theme_name=theme_name,
+        tool_renderer=tool_renderer,
+        options=options,
+    )
+    session_manager = session.session_manager
+    session_file = session_manager.get_session_file()
+    if session_file and not Path(session_file).exists():
+        raise FileNotFoundError("Nothing to export yet - start a conversation first")
+
+    session_data = _build_session_data_from_manager(session_manager)
+    session_data["systemPrompt"] = getattr(session, "system_prompt", None)
     session_data["tools"] = [
         {
             "name": tool.name,
@@ -171,22 +304,37 @@ def export_session_to_html(
         }
         for tool in session.agent.state.tools
     ]
-    html_content = generate_html(session_data, theme_name)
+    _attach_rendered_tools(session_data, opts.tool_renderer)
+    html_content = generate_html(session_data, opts.theme_name)
 
-    if output_path:
-        resolved_output = normalize_path(output_path)
+    if opts.output_path:
+        resolved_output = normalize_path(opts.output_path)
     else:
-        session_id = session.session_id or "session"
-        resolved_output = f"{APP_NAME}-session-{session_id}.html"
+        session_id = getattr(session, "session_id", None) or "session"
+        if session_file:
+            resolved_output = f"{APP_NAME}-session-{Path(session_file).stem}.html"
+        else:
+            resolved_output = f"{APP_NAME}-session-{session_id}.html"
 
     Path(resolved_output).write_text(html_content, encoding="utf-8")
     return resolved_output
 
 
 def export_from_file(
-    session_path: str, output_path: str | None = None, *, theme_name: str | None = None
+    session_path: str,
+    output_path: str | None = None,
+    *,
+    theme_name: str | None = None,
+    tool_renderer: ToolHtmlRenderer | None = None,
+    options: ExportOptions | None = None,
 ) -> str:
     """Export a JSONL session file to HTML."""
+    opts = _resolve_export_options(
+        output_path,
+        theme_name=theme_name,
+        tool_renderer=tool_renderer,
+        options=options,
+    )
     resolved_input = resolve_path(session_path)
     input_file = Path(resolved_input)
     if not input_file.exists():
@@ -194,10 +342,11 @@ def export_from_file(
 
     session_manager = SessionManager.open(resolved_input)
     session_data = _build_session_data_from_manager(session_manager)
-    html_content = generate_html(session_data, theme_name)
+    _attach_rendered_tools(session_data, opts.tool_renderer)
+    html_content = generate_html(session_data, opts.theme_name)
 
-    if output_path:
-        resolved_output = normalize_path(output_path)
+    if opts.output_path:
+        resolved_output = normalize_path(opts.output_path)
     else:
         resolved_output = f"{APP_NAME}-session-{input_file.stem}.html"
 

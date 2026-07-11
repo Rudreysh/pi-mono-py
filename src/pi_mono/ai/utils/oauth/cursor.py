@@ -7,7 +7,7 @@ import base64
 import json
 import time
 import uuid
-from typing import List
+from typing import Any, List
 from urllib.parse import urlencode
 
 import httpx
@@ -108,7 +108,12 @@ class CursorOAuthProvider:
 
         login_url = f"{CURSOR_LOGIN_URL}?{params}"
 
-        on_auth = callbacks.on_auth if hasattr(callbacks, "on_auth") else callbacks["onAuth"]
+        callbacks_any: Any = callbacks
+        on_auth = (
+            callbacks_any.on_auth
+            if hasattr(callbacks_any, "on_auth")
+            else callbacks_any.get("onAuth")
+        )
         if on_auth:
             on_auth(
                 {

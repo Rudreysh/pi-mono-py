@@ -21,6 +21,7 @@ from pi_mono.agent.harness.types import (
     toError,
 )
 from pi_mono.utils.abort_signals import AbortSignal
+from pi_mono.utils.shell import get_shell_config as resolve_shell_config
 
 
 def to_file_error(error: Exception, path: Optional[str] = None) -> FileError:
@@ -105,9 +106,7 @@ async def find_bash_on_path() -> Optional[str]:
 async def get_shell_config(
     custom_shell_path: Optional[str],
 ) -> Result[dict[str, Any], ExecutionError]:
-    if custom_shell_path:
-        if os.path.exists(custom_shell_path):
-            return ok({"shell": custom_shell_path, "args": ["-c"]})
+    if custom_shell_path and not os.path.exists(custom_shell_path):
         return err(
             ExecutionError(
                 "shell_unavailable",
@@ -115,33 +114,10 @@ async def get_shell_config(
             )
         )
 
-    if os.name == "nt":
-        program_files = os.environ.get("ProgramFiles")
-        candidates = []
-        if program_files:
-            candidates.append(os.path.join(program_files, "Git", "bin", "bash.exe"))
-        program_files_x86 = os.environ.get("ProgramFiles(x86)")
-        if program_files_x86:
-            candidates.append(os.path.join(program_files_x86, "Git", "bin", "bash.exe"))
-
-        for cand in candidates:
-            if os.path.exists(cand):
-                return ok({"shell": cand, "args": ["-c"]})
-
-        bash_on_path = await find_bash_on_path()
-        if bash_on_path:
-            return ok({"shell": bash_on_path, "args": ["-c"]})
-
-        return err(ExecutionError("shell_unavailable", "No bash shell found"))
-
-    if os.path.exists("/bin/bash"):
-        return ok({"shell": "/bin/bash", "args": ["-c"]})
-
-    bash_on_path = await find_bash_on_path()
-    if bash_on_path:
-        return ok({"shell": bash_on_path, "args": ["-c"]})
-
-    return ok({"shell": "sh", "args": ["-c"]})
+    try:
+        return ok(resolve_shell_config(custom_shell_path))
+    except (RuntimeError, ValueError) as error:
+        return err(ExecutionError("shell_unavailable", str(error)))
 
 
 def get_shell_env(
@@ -446,8 +422,9 @@ class LocalExecutionEnv(ExecutionEnv):
             return err(ExecutionError("unknown", "Shell configuration is empty"))
         shell = val["shell"]
         shell_args = val["args"]
-
-        spawn_args = list(shell_args) + [command]
+        command_transport = val.get("commandTransport")
+        command_from_stdin = command_transport == "stdin"
+        spawn_args = list(shell_args) if command_from_stdin else list(shell_args) + [command]
         env_dict = get_shell_env(self.shellEnv, options.get("env") if options else None)
 
         timed_out = False
@@ -502,10 +479,15 @@ class LocalExecutionEnv(ExecutionEnv):
                 *spawn_args,
                 cwd=cwd,
                 env=env_dict,
+                stdin=asyncio.subprocess.PIPE if command_from_stdin else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **kwargs,
             )
+            if command_from_stdin and proc.stdin is not None:
+                proc.stdin.write(command.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
         except Exception as e:
             if abort_signal:
                 abort_signal.remove_event_listener("abort", on_abort)

@@ -242,7 +242,9 @@ async def test_login_cursor_saves_api_key(mock_auth_file):
 
 @pytest.mark.anyio
 async def test_login_cursor_runs_agent_login(mock_auth_file):
-    with mock.patch("pi_mono.ai.cli.login_cursor_account", new_callable=mock.AsyncMock) as mock_login:
+    with mock.patch(
+        "pi_mono.ai.cli.login_cursor_account", new_callable=mock.AsyncMock
+    ) as mock_login:
         await login("cursor")
 
     mock_login.assert_called_once_with()

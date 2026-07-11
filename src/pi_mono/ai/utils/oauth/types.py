@@ -7,6 +7,8 @@ class OAuthCredentials(TypedDict, total=False):
     refresh: str
     access: str
     expires: int
+    enterpriseUrl: str
+    availableModelIds: list[str]
 
 
 OAuthProviderId = str

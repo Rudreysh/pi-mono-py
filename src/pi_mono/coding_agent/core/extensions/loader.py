@@ -10,6 +10,7 @@ from typing import Any
 
 from pi_mono.config import CONFIG_DIR_NAME, get_agent_dir
 from pi_mono.core.event_bus import EventBusController, create_event_bus
+from pi_mono.coding_agent.core.exec import exec_command
 from pi_mono.coding_agent.core.extensions.types import (
     Extension,
     ExtensionFactory,
@@ -21,6 +22,7 @@ from pi_mono.coding_agent.core.extensions.types import (
     ToolDefinition,
 )
 from pi_mono.coding_agent.core.source_info import create_synthetic_source_info
+from pi_mono.core.settings_manager import SettingsManager
 from pi_mono.utils.paths import resolve_path
 
 
@@ -131,6 +133,10 @@ class _ExtensionAPI:
         self._runtime.assert_active()
         self._extension.message_renderers[custom_type] = renderer
 
+    def register_entry_renderer(self, custom_type: str, renderer: Any) -> None:
+        self._runtime.assert_active()
+        self._extension.entry_renderers[custom_type] = renderer
+
     def get_flag(self, name: str) -> bool | str | None:
         self._runtime.assert_active()
         if name not in self._extension.flags:
@@ -164,6 +170,16 @@ class _ExtensionAPI:
     def set_label(self, entry_id: str, label: str | None) -> None:
         self._runtime.assert_active()
         self._runtime.set_label(entry_id, label)
+
+    async def exec(
+        self,
+        command: str,
+        args: list[str],
+        options: dict[str, Any] | None = None,
+    ) -> Any:
+        self._runtime.assert_active()
+        cwd = (options or {}).get("cwd") or self._cwd
+        return await exec_command(command, args, cwd, options)  # type: ignore[arg-type]
 
     def get_active_tools(self) -> list[str]:
         self._runtime.assert_active()
@@ -354,6 +370,42 @@ def discover_extensions_in_dir(directory: str) -> list[str]:
     except OSError:
         return []
     return discovered
+
+
+async def collect_configured_extension_paths(
+    cwd: str,
+    agent_dir: str,
+    settings_manager: SettingsManager,
+    additional_paths: list[str] | None = None,
+) -> list[str]:
+    from pi_mono.coding_agent.core.package_manager import DefaultPackageManager
+
+    resolved_cwd = resolve_path(cwd)
+    resolved_agent_dir = resolve_path(agent_dir)
+    paths: list[str] = list(additional_paths or [])
+    seen: set[str] = set()
+
+    def add_path(path: str) -> None:
+        resolved = os.path.abspath(resolve_path(path, resolved_cwd))
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        paths.append(path)
+
+    package_manager = DefaultPackageManager(
+        cwd=resolved_cwd,
+        agent_dir=resolved_agent_dir,
+        settings_manager=settings_manager,
+    )
+    resolved = await package_manager.resolve()
+    for resource in resolved["extensions"]:
+        if resource.get("enabled", True):
+            add_path(str(resource["path"]))
+
+    for path in settings_manager.get_extension_paths():
+        add_path(path)
+
+    return paths
 
 
 async def discover_and_load_extensions(

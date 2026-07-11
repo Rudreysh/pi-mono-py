@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import os
+import sys
 import time
 from typing import Any, Callable, Literal, TypedDict, Union, cast
 
@@ -74,11 +75,16 @@ class WarningSettings(TypedDict, total=False):
 PackageSource = Union[str, dict[str, Any]]
 
 
+DefaultProjectTrust = Literal["ask", "always", "never"]
+
+
 class Settings(TypedDict, total=False):
     lastChangelogVersion: str | None
     defaultProvider: str | None
     defaultModel: str | None
-    defaultThinkingLevel: Literal["off", "minimal", "low", "medium", "high", "xhigh"] | None
+    defaultThinkingLevel: (
+        Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    )
     transport: Literal["auto", "websocket", "sse"] | None
     steeringMode: Literal["all", "one-at-a-time"] | None
     followUpMode: Literal["all", "one-at-a-time"] | None
@@ -87,6 +93,8 @@ class Settings(TypedDict, total=False):
     branchSummary: BranchSummarySettings | None
     retry: RetrySettings | None
     hideThinkingBlock: bool | None
+    showCacheMissNotices: bool | None
+    externalEditor: str | None
     shellPath: str | None
     quietStartup: bool | None
     shellCommandPrefix: str | None
@@ -106,13 +114,16 @@ class Settings(TypedDict, total=False):
     treeFilterMode: Literal["default", "no-tools", "user-only", "labeled-only", "all"] | None
     thinkingBudgets: ThinkingBudgetsSettings | None
     editorPaddingX: int | None
+    outputPad: Literal[0, 1] | None
     autocompleteMaxVisible: int | None
     showHardwareCursor: bool | None
     markdown: MarkdownSettings | None
     warnings: WarningSettings | None
     sessionDir: str | None
     httpIdleTimeoutMs: int | None
+    httpProxy: str | None
     websocketConnectTimeoutMs: int | None
+    defaultProjectTrust: DefaultProjectTrust | None
 
 
 # =============================================================================
@@ -267,10 +278,12 @@ class SettingsManager:
         global_load_error: Exception | None = None,
         project_load_error: Exception | None = None,
         initial_errors: list[dict[str, Any]] | None = None,
+        project_trusted: bool = True,
     ):
         self.storage = storage
         self.global_settings = initial_global
         self.project_settings = initial_project
+        self.project_trusted = project_trusted
         self.global_settings_load_error = global_load_error
         self.project_settings_load_error = project_load_error
         self.errors = list(initial_errors) if initial_errors else []
@@ -291,18 +304,20 @@ class SettingsManager:
         self._write_tasks: list[asyncio.Task[None]] = []
 
     @staticmethod
-    def create(cwd: str, agent_dir: str | None = None) -> SettingsManager:
+    def create(
+        cwd: str, agent_dir: str | None = None, *, project_trusted: bool = True
+    ) -> SettingsManager:
         """Create a SettingsManager that loads from files."""
         if agent_dir is None:
             agent_dir = str(get_agent_dir())
         storage = FileSettingsStorage(cwd, agent_dir)
-        return SettingsManager.from_storage(storage)
+        return SettingsManager.from_storage(storage, project_trusted=project_trusted)
 
     @staticmethod
-    def from_storage(storage: SettingsStorage) -> SettingsManager:
+    def from_storage(storage: SettingsStorage, *, project_trusted: bool = True) -> SettingsManager:
         """Create a SettingsManager from an arbitrary storage backend."""
         global_load = SettingsManager.try_load_from_storage(storage, "global")
-        project_load = SettingsManager.try_load_from_storage(storage, "project")
+        project_load = SettingsManager.try_load_from_storage(storage, "project", project_trusted)
         initial_errors = []
         if global_load["error"]:
             initial_errors.append({"scope": "global", "error": global_load["error"]})
@@ -316,6 +331,7 @@ class SettingsManager:
             global_load["error"],
             project_load["error"],
             initial_errors,
+            project_trusted,
         )
 
     @staticmethod
@@ -329,7 +345,11 @@ class SettingsManager:
         return SettingsManager.from_storage(storage)
 
     @staticmethod
-    def load_from_storage(storage: SettingsStorage, scope: str) -> Settings:
+    def load_from_storage(
+        storage: SettingsStorage, scope: str, project_trusted: bool = True
+    ) -> Settings:
+        if scope == "project" and not project_trusted:
+            return {}
         content = None
 
         def callback(current: str | None) -> str | None:
@@ -343,9 +363,14 @@ class SettingsManager:
         return SettingsManager.migrate_settings(json.loads(content))
 
     @staticmethod
-    def try_load_from_storage(storage: SettingsStorage, scope: str) -> dict[str, Any]:
+    def try_load_from_storage(
+        storage: SettingsStorage, scope: str, project_trusted: bool = True
+    ) -> dict[str, Any]:
         try:
-            return {"settings": SettingsManager.load_from_storage(storage, scope), "error": None}
+            return {
+                "settings": SettingsManager.load_from_storage(storage, scope, project_trusted),
+                "error": None,
+            }
         except Exception as e:
             return {"settings": {}, "error": e}
 
@@ -401,6 +426,49 @@ class SettingsManager:
     def get_project_settings(self) -> Settings:
         return copy.deepcopy(self.project_settings)
 
+    def is_project_trusted(self) -> bool:
+        return self.project_trusted
+
+    def set_project_trusted(self, trusted: bool) -> None:
+        if self.project_trusted == trusted:
+            return
+        self.project_trusted = trusted
+        self.modified_project_fields.clear()
+        self.modified_project_nested_fields.clear()
+        if not trusted:
+            self.project_settings = {}
+            self.project_settings_load_error = None
+            self.settings = cast(
+                Settings,
+                deep_merge_settings(
+                    cast(dict[str, Any], self.global_settings),
+                    cast(dict[str, Any], self.project_settings),
+                ),
+            )
+            return
+        project_load = SettingsManager.try_load_from_storage(self.storage, "project", trusted)
+        self.project_settings = project_load["settings"]
+        self.project_settings_load_error = project_load["error"]
+        if project_load["error"]:
+            self._record_error("project", project_load["error"])
+        self.settings = cast(
+            Settings,
+            deep_merge_settings(
+                cast(dict[str, Any], self.global_settings),
+                cast(dict[str, Any], self.project_settings),
+            ),
+        )
+
+    def get_default_project_trust(self) -> DefaultProjectTrust:
+        value = self.global_settings.get("defaultProjectTrust")
+        if value in ("ask", "always", "never"):
+            return value
+        return "ask"
+
+    def set_default_project_trust(self, default_project_trust: DefaultProjectTrust) -> None:
+        self.global_settings["defaultProjectTrust"] = default_project_trust
+        self._mark_modified("defaultProjectTrust")
+
     async def reload(self) -> None:
         await self.flush()
         global_load = SettingsManager.try_load_from_storage(self.storage, "global")
@@ -416,7 +484,9 @@ class SettingsManager:
         self.modified_project_fields.clear()
         self.modified_project_nested_fields.clear()
 
-        project_load = SettingsManager.try_load_from_storage(self.storage, "project")
+        project_load = SettingsManager.try_load_from_storage(
+            self.storage, "project", self.project_trusted
+        )
         if not project_load["error"]:
             self.project_settings = project_load["settings"]
             self.project_settings_load_error = None
@@ -648,8 +718,15 @@ class SettingsManager:
         self._mark_modified("followUpMode")
         self.save()
 
+    def get_theme_setting(self) -> str | None:
+        value = self.settings.get("theme")
+        return value if isinstance(value, str) else None
+
     def get_theme(self) -> str | None:
-        return self.settings.get("theme")
+        theme_setting = self.get_theme_setting()
+        if theme_setting and "/" in theme_setting:
+            return None
+        return theme_setting
 
     def set_theme(self, theme: str) -> None:
         self.global_settings["theme"] = theme
@@ -658,11 +735,11 @@ class SettingsManager:
 
     def get_default_thinking_level(
         self,
-    ) -> Literal["off", "minimal", "low", "medium", "high", "xhigh"] | None:
+    ) -> Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None:
         return self.settings.get("defaultThinkingLevel")
 
     def set_default_thinking_level(
-        self, level: Literal["off", "minimal", "low", "medium", "high", "xhigh"]
+        self, level: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
     ) -> None:
         self.global_settings["defaultThinkingLevel"] = level
         self._mark_modified("defaultThinkingLevel")
@@ -752,6 +829,13 @@ class SettingsManager:
         val = parse_timeout_setting(self.settings.get("httpIdleTimeoutMs"), "httpIdleTimeoutMs")
         return val if val is not None else DEFAULT_HTTP_IDLE_TIMEOUT_MS
 
+    def get_http_proxy(self) -> str | None:
+        value = self.settings.get("httpProxy")
+        if not isinstance(value, str):
+            return None
+        trimmed = value.strip()
+        return trimmed if trimmed else None
+
     def set_http_idle_timeout_ms(self, timeout_ms: int) -> None:
         if (
             not isinstance(timeout_ms, (int, float))
@@ -792,8 +876,26 @@ class SettingsManager:
         self._mark_modified("hideThinkingBlock")
         self.save()
 
+    def get_show_cache_miss_notices(self) -> bool:
+        return bool(self.settings.get("showCacheMissNotices", False))
+
+    def set_show_cache_miss_notices(self, show: bool) -> None:
+        self.global_settings["showCacheMissNotices"] = show
+        self._mark_modified("showCacheMissNotices")
+        self.save()
+
+    def get_external_editor_command(self) -> str | None:
+        configured = self.settings.get("externalEditor")
+        if isinstance(configured, str) and configured.strip() != "":
+            return configured
+        environment_editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+        if environment_editor:
+            return environment_editor
+        return "notepad" if sys.platform == "win32" else "nano"
+
     def get_shell_path(self) -> str | None:
-        return self.settings.get("shellPath")
+        shell_path = self.settings.get("shellPath")
+        return normalize_path(shell_path) if shell_path else shell_path
 
     def set_shell_path(self, path: str | None) -> None:
         self.global_settings["shellPath"] = path
@@ -1051,6 +1153,14 @@ class SettingsManager:
     def set_editor_padding_x(self, padding: int) -> None:
         self.global_settings["editorPaddingX"] = max(0, min(3, int(padding)))
         self._mark_modified("editorPaddingX")
+        self.save()
+
+    def get_output_pad(self) -> Literal[0, 1]:
+        return 0 if self.settings.get("outputPad") == 0 else 1
+
+    def set_output_pad(self, padding: Literal[0, 1]) -> None:
+        self.global_settings["outputPad"] = padding
+        self._mark_modified("outputPad")
         self.save()
 
     def get_autocomplete_max_visible(self) -> int:

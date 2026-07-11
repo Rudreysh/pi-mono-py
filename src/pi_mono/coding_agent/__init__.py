@@ -46,6 +46,12 @@ from pi_mono.coding_agent.core.tools import (
     create_read_only_tools,
     create_tool,
 )
+from pi_mono.agent.harness.compaction.compaction import estimate_messages_tokens, estimate_tokens
+from pi_mono.coding_agent.core.tools.edit_diff import (
+    EditDiffResult,
+    generate_diff_string,
+    generate_unified_patch,
+)
 from pi_mono.coding_agent.main import MainOptions, main
 from pi_mono.coding_agent.modes.print_mode import PrintModeOptions, run_print_mode
 
@@ -85,9 +91,14 @@ __all__ = [
     "define_tool",
     "discover_and_load_extensions",
     "discover_extensions_in_dir",
+    "EditDiffResult",
+    "estimate_messages_tokens",
+    "estimate_tokens",
     "execute_bash_with_operations",
     "format_prompt_template_invocation",
     "format_skill_invocation",
+    "generate_diff_string",
+    "generate_unified_patch",
     "load_extension_from_factory",
     "load_extensions",
     "load_prompt_templates",

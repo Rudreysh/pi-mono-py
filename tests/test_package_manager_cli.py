@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from pi_mono.coding_agent.package_manager_cli import handle_package_command, parse_package_command
 from pi_mono.core.settings_manager import SettingsManager
@@ -66,8 +67,19 @@ async def test_handle_package_command_remove(cli_env):
 
 @pytest.mark.anyio
 async def test_handle_package_command_update_runs(cli_env, capsys):
-    handled = await handle_package_command(["update"])
+    with (
+        patch(
+            "pi_mono.coding_agent.package_manager_cli._get_self_update_plan",
+            new=AsyncMock(return_value={"packageName": "pkg", "shouldRun": True}),
+        ),
+        patch(
+            "pi_mono.coding_agent.package_manager_cli.get_self_update_command",
+            return_value={"command": "true", "args": [], "display": "true"},
+        ),
+        patch("pi_mono.coding_agent.package_manager_cli._run_self_update"),
+    ):
+        handled = await handle_package_command(["update"])
     assert handled is True
     captured = capsys.readouterr()
     assert "not implemented" not in captured.out.lower()
-    assert captured.err == ""
+    assert "Extensions are skipped" in captured.out

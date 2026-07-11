@@ -25,12 +25,10 @@ from pi_mono.core.resolve_config_value import (
     get_config_value_env_var_names,
     is_command_config_value,
     is_config_value_configured,
-    is_legacy_env_var_name_config_value,
     resolve_config_value_or_throw,
     resolve_config_value_uncached,
     resolve_headers_or_throw,
 )
-from pi_mono.utils.deprecation import warn_deprecation
 from pi_mono.utils.paths import normalize_path
 from pi_mono.utils.validation import validate_value
 
@@ -107,6 +105,40 @@ ThinkingLevelMapSchema = {
         "medium": ThinkingLevelMapValueSchema,
         "high": ThinkingLevelMapValueSchema,
         "xhigh": ThinkingLevelMapValueSchema,
+        "max": ThinkingLevelMapValueSchema,
+    },
+}
+
+_ModelCostRatesProperties = {
+    "input": {"type": "number"},
+    "output": {"type": "number"},
+    "cacheRead": {"type": "number"},
+    "cacheWrite": {"type": "number"},
+}
+
+ModelCostTierSchema = {
+    "type": "object",
+    "required": ["inputTokensAbove", "input", "output", "cacheRead", "cacheWrite"],
+    "properties": {
+        "inputTokensAbove": {"type": "number"},
+        **_ModelCostRatesProperties,
+    },
+}
+
+ModelCostSchema = {
+    "type": "object",
+    "required": ["input", "output", "cacheRead", "cacheWrite"],
+    "properties": {
+        **_ModelCostRatesProperties,
+        "tiers": {"type": "array", "items": ModelCostTierSchema},
+    },
+}
+
+ModelCostOverrideSchema = {
+    "type": "object",
+    "properties": {
+        **_ModelCostRatesProperties,
+        "tiers": {"type": "array", "items": ModelCostTierSchema},
     },
 }
 
@@ -180,16 +212,7 @@ ModelDefinitionSchema = {
         "reasoning": {"type": "boolean"},
         "thinkingLevelMap": ThinkingLevelMapSchema,
         "input": {"type": "array", "items": {"type": "string", "enum": ["text", "image"]}},
-        "cost": {
-            "type": "object",
-            "required": ["input", "output", "cacheRead", "cacheWrite"],
-            "properties": {
-                "input": {"type": "number"},
-                "output": {"type": "number"},
-                "cacheRead": {"type": "number"},
-                "cacheWrite": {"type": "number"},
-            },
-        },
+        "cost": ModelCostSchema,
         "contextWindow": {"type": "number"},
         "maxTokens": {"type": "number"},
         "headers": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -204,15 +227,7 @@ ModelOverrideSchema = {
         "reasoning": {"type": "boolean"},
         "thinkingLevelMap": ThinkingLevelMapSchema,
         "input": {"type": "array", "items": {"type": "string", "enum": ["text", "image"]}},
-        "cost": {
-            "type": "object",
-            "properties": {
-                "input": {"type": "number"},
-                "output": {"type": "number"},
-                "cacheRead": {"type": "number"},
-                "cacheWrite": {"type": "number"},
-            },
-        },
+        "cost": ModelCostOverrideSchema,
         "contextWindow": {"type": "number"},
         "maxTokens": {"type": "number"},
         "headers": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -268,15 +283,8 @@ def strip_json_comments(input_str: str) -> str:
 def migrate_legacy_register_provider_config_value(
     provider_name: str, field: str, value: str
 ) -> str:
-    if not isinstance(value, str):
-        return value
-    if not is_legacy_env_var_name_config_value(value):
-        return value
-    warn_deprecation(
-        f'registerProvider("{provider_name}") {field} value "{value}" is treated as a legacy environment variable reference. '
-        f'This will no longer be detected as an environment variable reference in a future release. Pass "${value}" instead.'
-    )
-    return f"${value}"
+    del provider_name, field
+    return value
 
 
 def migrate_legacy_register_provider_headers(
@@ -393,12 +401,16 @@ def apply_model_override(model: Model, override: dict[str, Any]) -> Model:
         model_cost = result.get(
             "cost", {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0}
         )
-        result["cost"] = {
+        merged_cost: dict[str, Any] = {
             "input": cost_override.get("input", model_cost.get("input", 0.0)),
             "output": cost_override.get("output", model_cost.get("output", 0.0)),
             "cacheRead": cost_override.get("cacheRead", model_cost.get("cacheRead", 0.0)),
             "cacheWrite": cost_override.get("cacheWrite", model_cost.get("cacheWrite", 0.0)),
         }
+        tiers = cost_override.get("tiers", model_cost.get("tiers"))
+        if tiers is not None:
+            merged_cost["tiers"] = tiers
+        result["cost"] = cast(ModelCost, merged_cost)
 
     if override.get("compat") is not None:
         result["compat"] = cast(
@@ -752,6 +764,7 @@ class ModelRegistry:
         try:
             provider = model.get("provider", "")
             provider_config = self.provider_request_configs.get(provider, {})
+            provider_env = self.auth_storage.get_provider_env(provider)
             api_key_from_auth_storage = await self.auth_storage.get_api_key(
                 provider, {"includeFallback": False}
             )
@@ -764,19 +777,20 @@ class ModelRegistry:
                 api_key = "<authenticated>"
             elif provider_api_key is not None:
                 api_key = resolve_config_value_or_throw(
-                    provider_api_key, f'API key for provider "{provider}"'
+                    provider_api_key, f'API key for provider "{provider}"', provider_env
                 )
             else:
                 api_key = None
 
             provider_headers = resolve_headers_or_throw(
-                provider_config.get("headers"), f'provider "{provider}"'
+                provider_config.get("headers"), f'provider "{provider}"', provider_env
             )
             model_headers = resolve_headers_or_throw(
                 self.model_request_headers.get(
                     self.get_model_request_key(provider, model.get("id", ""))
                 ),
                 f'model "{provider}/{model.get("id", "")}"',
+                provider_env,
             )
 
             base_headers = model.get("headers")
@@ -797,6 +811,7 @@ class ModelRegistry:
                 "ok": True,
                 "apiKey": api_key,
                 "headers": headers if len(headers) > 0 else None,
+                "env": provider_env if provider_env else None,
             }
         except Exception as error:
             return {"ok": False, "error": str(error)}
