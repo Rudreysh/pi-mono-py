@@ -419,6 +419,12 @@ class InteractiveMode:
 
         self._editor.on_submit = on_submit
 
+    def _add_to_prompt_history(self, text: str) -> None:
+        """Remember submitted input for editor up/down history navigation."""
+        if self._editor is None:
+            return
+        self._editor.add_to_history(text)
+
     def _setup_editor_keybindings(self) -> None:
         assert self._editor is not None
 
@@ -1227,6 +1233,7 @@ class InteractiveMode:
         if not text:
             return
         if self._input_waiter is not None and not self._input_waiter.done():
+            self._add_to_prompt_history(text)
             self._input_waiter.set_result(text)
             return
         await self._handle_user_input(text)
@@ -1239,6 +1246,7 @@ class InteractiveMode:
             is_excluded = text.startswith("!!")
             command = text[2:].strip() if is_excluded else text[1:].strip()
             if command:
+                self._add_to_prompt_history(text)
                 await self._handle_bash_command(command, exclude_from_context=is_excluded)
             return
         if text.startswith("/"):
@@ -2743,6 +2751,7 @@ class InteractiveMode:
         self._chat_container.add_child(Text(theme.fg("muted", text), padding_x=1, padding_y=0))
 
     async def _handle_prompt(self, text: str, images: list[ImageContent] | None = None) -> None:
+        self._add_to_prompt_history(text)
         try:
             from pi_mono.coding_agent.core.agent_session import PromptOptions
 
