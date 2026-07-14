@@ -27,6 +27,9 @@ dev = [
   "mypy",
   "black"
 ]
+perplexity-pro = [
+  "curl_cffi>=0.7.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

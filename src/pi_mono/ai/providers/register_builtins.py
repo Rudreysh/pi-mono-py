@@ -89,6 +89,12 @@ _LAZY_PROVIDERS: list[tuple[str, str, str, str]] = [
         "stream_openai_codex_responses",
         "stream_simple_openai_codex_responses",
     ),
+    (
+        "perplexity-web",
+        "pi_mono.ai.providers.perplexity_web",
+        "stream_perplexity_web",
+        "stream_simple_perplexity_web",
+    ),
 ]
 
 

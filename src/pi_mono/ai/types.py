@@ -12,6 +12,7 @@ KnownApi = Literal[
     "bedrock-converse-stream",
     "google-generative-ai",
     "google-vertex",
+    "perplexity-web",
 ]
 
 Api = Union[KnownApi, str]
@@ -57,6 +58,8 @@ KnownProvider = Literal[
     "xiaomi-token-plan-ams",
     "xiaomi-token-plan-sgp",
     "cursor",
+    "perplexity",
+    "perplexity-pro",
 ]
 
 Provider = Union[KnownProvider, str]

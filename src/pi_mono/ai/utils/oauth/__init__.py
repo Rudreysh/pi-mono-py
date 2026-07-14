@@ -32,6 +32,13 @@ from pi_mono.ai.utils.oauth.openai_codex import (
     openai_codex_oauth_provider,
     refresh_openai_codex_token,
 )
+from pi_mono.ai.utils.oauth.perplexity_pro import (
+    PerplexityProOAuthProvider,
+    login_perplexity_pro,
+    normalize_session_token,
+    perplexity_pro_oauth_provider,
+    refresh_perplexity_pro_token,
+)
 from pi_mono.ai.utils.oauth.cursor import (
     CursorOAuthProvider,
     cursor_oauth_provider,
@@ -56,6 +63,7 @@ BUILT_IN_OAUTH_PROVIDERS: list[Any] = [
     github_copilot_oauth_provider,
     openai_codex_oauth_provider,
     cursor_oauth_provider,
+    perplexity_pro_oauth_provider,
 ]
 
 _oauth_provider_registry: dict[str, Any] = {p.id: p for p in BUILT_IN_OAUTH_PROVIDERS}
@@ -156,6 +164,7 @@ __all__ = [
     "github_copilot_oauth_provider",
     "openai_codex_oauth_provider",
     "cursor_oauth_provider",
+    "perplexity_pro_oauth_provider",
     "generate_pkce",
     "get_github_copilot_base_url",
     "get_oauth_api_key",
@@ -166,7 +175,9 @@ __all__ = [
     "login_github_copilot",
     "login_openai_codex",
     "login_openai_codex_device_code",
+    "login_perplexity_pro",
     "normalize_domain",
+    "normalize_session_token",
     "oauth_error_html",
     "oauth_success_html",
     "poll_oauth_device_code_flow",
@@ -174,6 +185,7 @@ __all__ = [
     "refresh_github_copilot_token",
     "refresh_oauth_token",
     "refresh_openai_codex_token",
+    "refresh_perplexity_pro_token",
     "register_oauth_provider",
     "reset_oauth_providers",
     "unregister_oauth_provider",

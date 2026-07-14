@@ -1,5 +1,6 @@
 
 from pi_mono.ai.cursor_agent import discover_cursor_models
+from pi_mono.ai.perplexity_pro_models import PERPLEXITY_PRO_MODELS
 from pi_mono.ai.types import (
     CostBreakdown,
     Model,
@@ -14,6 +15,9 @@ model_registry: dict[str, dict[str, Model]] = {}
 # Initialize registry
 for provider, models in MODELS.items():
     model_registry[provider] = {id: m for id, m in models.items()}
+
+# Python-only Perplexity Pro subscription catalog (web session, not official API).
+model_registry["perplexity-pro"] = dict(PERPLEXITY_PRO_MODELS)
 
 
 def get_model(provider: str, model_id: str) -> Model | None:

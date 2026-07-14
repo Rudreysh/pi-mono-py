@@ -64,6 +64,9 @@ def get_api_key_env_vars(provider: str) -> list[str] | None:
         "xiaomi-token-plan-ams": "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
         "xiaomi-token-plan-sgp": "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
         "cursor": "CURSOR_API_KEY",
+        "perplexity": "PERPLEXITY_API_KEY",
+        # Session cookie for unofficial Pro web access (optional env fallback).
+        "perplexity-pro": "PERPLEXITY_SESSION_TOKEN",
     }
 
     env_var = env_map.get(provider)

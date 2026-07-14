@@ -53,6 +53,8 @@ default_model_per_provider: dict[KnownProvider, str] = {
     "xiaomi-token-plan-cn": "mimo-v2.5-pro",
     "xiaomi-token-plan-ams": "mimo-v2.5-pro",
     "xiaomi-token-plan-sgp": "mimo-v2.5-pro",
+    "perplexity": "sonar-pro",
+    "perplexity-pro": "sonnet",
 }
 
 
