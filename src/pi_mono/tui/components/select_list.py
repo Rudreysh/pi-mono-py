@@ -123,11 +123,13 @@ class SelectList(Component):
                 )
             )
 
-        # Add scroll indicators if needed
+        # Add scroll indicators if needed (guard narrow terminals, cf. TS #7015)
         if start_index > 0 or end_index < len(self._filtered_items):
-            scroll_text = f"  ({self._selected_index + 1}/{len(self._filtered_items)})"
-            truncated_scroll = truncate_to_width(scroll_text, width - 2, "")
-            lines.append(self._theme.scroll_info(truncated_scroll))
+            indicator_width = max(0, width - 2)
+            if indicator_width > 0:
+                scroll_text = f"  ({self._selected_index + 1}/{len(self._filtered_items)})"
+                truncated_scroll = truncate_to_width(scroll_text, indicator_width, "")
+                lines.append(self._theme.scroll_info(truncated_scroll))
 
         return lines
 

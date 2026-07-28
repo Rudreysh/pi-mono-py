@@ -705,7 +705,7 @@ def stream_anthropic(
                     "total": 0.0,
                 },
             },
-            "stopReason": "stop",
+            "stopReason": "pending",
             "timestamp": int(time.time() * 1000),
         }
 
@@ -717,6 +717,15 @@ def stream_anthropic(
                 is_oauth = False
             else:
                 api_key = options_dict.get("apiKey")
+                if not api_key:
+                    from pi_mono.ai.env_api_keys import get_anthropic_auth_token
+
+                    auth_token = get_anthropic_auth_token()
+                    if auth_token:
+                        api_key = auth_token
+                        headers = dict(options_dict.get("headers") or {})
+                        headers.setdefault("Authorization", f"Bearer {auth_token}")
+                        options_dict["headers"] = headers
                 if not api_key:
                     raise ValueError(f"No API key for provider: {model.get('provider')}")
 
@@ -993,6 +1002,9 @@ def stream_anthropic(
             signal = options_dict.get("signal")
             if signal and getattr(signal, "aborted", False):
                 raise ValueError("Request was aborted")
+
+            if output.get("stopReason") == "pending":
+                raise ValueError("Stream ended without a stop reason")
 
             if output.get("stopReason") in ("aborted", "error"):
                 raise ValueError("An unknown error occurred")

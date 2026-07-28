@@ -135,7 +135,7 @@ class SettingsList(Component):
             # Calculate space for value
             separator = "  "
             used_width = prefix_width + max_label_width + visible_width(separator)
-            value_max_width = width - used_width - 2
+            value_max_width = max(0, width - used_width - 2)
 
             value_text = self._theme.value(
                 truncate_to_width(item.current_value, value_max_width, ""), is_selected
@@ -143,10 +143,12 @@ class SettingsList(Component):
 
             lines.append(truncate_to_width(prefix + label_text + separator + value_text, width))
 
-        # Add scroll indicator if needed
+        # Add scroll indicator if needed (guard narrow terminals, cf. TS #7015)
         if start_index > 0 or end_index < len(display_items):
-            scroll_text = f"  ({self._selected_index + 1}/{len(display_items)})"
-            lines.append(self._theme.hint(truncate_to_width(scroll_text, width - 2, "")))
+            indicator_width = max(0, width - 2)
+            if indicator_width > 0:
+                scroll_text = f"  ({self._selected_index + 1}/{len(display_items)})"
+                lines.append(self._theme.hint(truncate_to_width(scroll_text, indicator_width, "")))
 
         # Add description for selected item
         selected_item = display_items[self._selected_index]

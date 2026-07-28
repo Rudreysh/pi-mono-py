@@ -189,6 +189,7 @@ class ExtensionRunner:
         self._get_context_usage_fn = context_actions.get_context_usage
         self._compact_fn = context_actions.compact
         self._get_system_prompt_fn = context_actions.get_system_prompt
+        self._get_scoped_models_fn = context_actions.get_scoped_models
         if context_actions.get_system_prompt_options is not None:
             self._get_system_prompt_options_fn = context_actions.get_system_prompt_options
 
@@ -480,6 +481,11 @@ class ExtensionRunner:
                 runner._assert_active()
                 return runner._get_system_prompt_fn()
 
+            @property
+            def scoped_models(self) -> list[dict[str, Any]]:
+                runner._assert_active()
+                return runner._get_scoped_models_fn()
+
         return _Context()  # type: ignore[return-value]
 
     def create_command_context(self) -> ExtensionCommandContext:
@@ -515,6 +521,10 @@ class ExtensionRunner:
 
             def get_system_prompt(self) -> str:
                 return context.get_system_prompt()
+
+            @property
+            def scoped_models(self) -> list[dict[str, Any]]:
+                return context.scoped_models
 
             def get_system_prompt_options(self) -> dict[str, Any]:
                 self._assert_active()

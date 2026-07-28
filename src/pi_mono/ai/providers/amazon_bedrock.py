@@ -107,7 +107,7 @@ def stream_bedrock(
                     "total": 0.0,
                 },
             },
-            "stopReason": "stop",
+            "stopReason": "pending",
             "timestamp": int(time.time() * 1000),
         }
 

@@ -172,6 +172,30 @@ class AgentSessionEventEntryAppended(TypedDict):
     entry: dict[str, Any]
 
 
+class AgentSessionEventBashExecutionUpdate(TypedDict, total=False):
+    type: Literal["bash_execution_update"]
+    id: str
+    delta: str
+
+
+class AgentSessionEventSummarizationRetryScheduled(TypedDict):
+    type: Literal["summarization_retry_scheduled"]
+    attempt: int
+    maxAttempts: int
+    delayMs: int
+    errorMessage: str
+
+
+class AgentSessionEventSummarizationRetryAttemptStart(TypedDict, total=False):
+    type: Literal["summarization_retry_attempt_start"]
+    source: Literal["compaction", "branchSummary"]
+    reason: str
+
+
+class AgentSessionEventSummarizationRetryFinished(TypedDict):
+    type: Literal["summarization_retry_finished"]
+
+
 AgentSessionEvent = (
     AgentEvent
     | AgentSessionEventQueueUpdate
@@ -183,6 +207,10 @@ AgentSessionEvent = (
     | AgentSessionEventAutoRetryEnd
     | AgentSessionEventAgentSettled
     | AgentSessionEventEntryAppended
+    | AgentSessionEventBashExecutionUpdate
+    | AgentSessionEventSummarizationRetryScheduled
+    | AgentSessionEventSummarizationRetryAttemptStart
+    | AgentSessionEventSummarizationRetryFinished
 )
 
 AgentSessionEventListener = Callable[[AgentSessionEvent], None]
@@ -276,7 +304,7 @@ class AgentSession:
         self._follow_up_messages: list[str] = []
         self._compaction_abort_controller: AbortController | None = None
         self._branch_summary_abort_controller: AbortController | None = None
-        self._bash_abort_controller: AbortController | None = None
+        self._bash_abort_controllers: set[AbortController] = set()
         self.agent = config.agent
         self.session_manager = config.session_manager
         self.settings_manager = config.settings_manager
@@ -841,7 +869,24 @@ class AgentSession:
 
     @property
     def is_bash_running(self) -> bool:
-        return self._bash_abort_controller is not None
+        return len(self._bash_abort_controllers) > 0
+
+    def _bash_session_env(self) -> dict[str, str]:
+        env: dict[str, str] = {}
+        session_file = getattr(self.session_manager, "session_file", None)
+        if session_file:
+            env["PI_SESSION_FILE"] = str(session_file)
+        session_id = getattr(self.session_manager, "session_id", None)
+        if session_id:
+            env["PI_SESSION_ID"] = str(session_id)
+        model = self.model
+        if model:
+            env["PI_PROVIDER"] = model.get("provider", "")
+            env["PI_MODEL"] = model.get("id", "")
+        thinking = self.thinking_level
+        if thinking:
+            env["PI_REASONING_LEVEL"] = str(thinking)
+        return env
 
     async def execute_bash(
         self,
@@ -851,10 +896,16 @@ class AgentSession:
         exclude_from_context: bool = False,
         operations: LocalBashOperations | None = None,
     ) -> BashResult:
-        self._bash_abort_controller = AbortController()
+        abort_controller = AbortController()
+        self._bash_abort_controllers.add(abort_controller)
         prefix = self.settings_manager.get_shell_command_prefix()
         resolved_command = f"{prefix}\n{command}" if prefix else command
         bash_operations = operations or LocalBashOperations()
+
+        def _on_chunk_wrapper(delta: str) -> None:
+            if on_chunk:
+                on_chunk(delta)
+            self._emit({"type": "bash_execution_update", "delta": delta})
 
         try:
             result = await execute_bash_with_operations(
@@ -862,14 +913,14 @@ class AgentSession:
                 self.session_manager.get_cwd(),
                 bash_operations,
                 BashExecutorOptions(
-                    on_chunk=on_chunk,
-                    signal=self._bash_abort_controller.signal,
+                    on_chunk=_on_chunk_wrapper,
+                    signal=abort_controller.signal,
                 ),
             )
             self.record_bash_result(command, result, exclude_from_context=exclude_from_context)
             return result
         finally:
-            self._bash_abort_controller = None
+            self._bash_abort_controllers.discard(abort_controller)
 
     def record_bash_result(
         self,
@@ -895,8 +946,8 @@ class AgentSession:
             append(bash_message)
 
     def abort_bash(self) -> None:
-        if self._bash_abort_controller is not None:
-            self._bash_abort_controller.abort()
+        for abort_controller in list(self._bash_abort_controllers):
+            abort_controller.abort()
 
     async def wait_for_idle(self) -> None:
         if self.is_idle:
@@ -1878,6 +1929,33 @@ class AgentSession:
             return await self._run_auto_compaction("threshold", False)
         return False
 
+    def _build_summarization_retry_callbacks(
+        self, source: dict[str, str]
+    ) -> dict[str, Any]:
+        """Build retry callbacks that emit summarization_retry_* events."""
+        from pi_mono.ai.utils.retry import RetryCallbacks
+
+        def on_retry_scheduled(attempt: int, max_attempts: int, delay_ms: int, error_message: str) -> None:
+            self._emit({
+                "type": "summarization_retry_scheduled",
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "delayMs": delay_ms,
+                "errorMessage": error_message,
+            })
+
+        def on_retry_attempt_start() -> None:
+            self._emit({"type": "summarization_retry_attempt_start", **source})
+
+        def on_retry_finished(success: bool, attempt: int, final_error: str | None = None) -> None:
+            self._emit({"type": "summarization_retry_finished"})
+
+        return RetryCallbacks(
+            on_retry_scheduled=on_retry_scheduled,
+            on_retry_attempt_start=on_retry_attempt_start,
+            on_retry_finished=on_retry_finished,
+        )
+
     async def _run_auto_compaction(self, reason: CompactionReason, will_retry: bool) -> bool:
         if not self.model:
             return False
@@ -2266,6 +2344,7 @@ class AgentSession:
             get_context_usage=self.get_context_usage,
             compact=compact,
             get_system_prompt=lambda: self.system_prompt,
+            get_scoped_models=lambda: self.scoped_models,
             get_system_prompt_options=lambda: self._base_system_prompt_options,
         )
 

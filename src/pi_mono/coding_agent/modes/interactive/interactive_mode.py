@@ -541,6 +541,9 @@ class InteractiveMode:
             if kb.matches(data, "app.session.fork"):
                 self._show_user_message_selector()
                 return {"consume": True}
+            if kb.matches(data, "app.message.copy"):
+                self._copy_last_assistant_message()
+                return {"consume": True}
             if matches_key(data, "ctrl+c"):
                 if self._session.is_streaming:
                     self._session.agent.abort()
@@ -1210,6 +1213,31 @@ class InteractiveMode:
         self._stop_retry_loader()
         if not event.get("success") and event.get("finalError"):
             self._show_status(theme.fg("error", str(event.get("finalError"))))
+
+    def _copy_last_assistant_message(self) -> None:
+        """Copy the last assistant message text to the system clipboard."""
+        messages = self._session.get_messages() if hasattr(self._session, "get_messages") else []
+        last_text: str | None = None
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            parts: list[str] = []
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            if parts:
+                last_text = "\n".join(parts)
+                break
+        if not last_text:
+            self._show_status(theme.fg("warning", "No assistant message to copy"))
+            return
+        try:
+            from pi_mono.utils.clipboard import write_clipboard_text
+
+            write_clipboard_text(last_text)
+            self._show_status(theme.fg("success", "Copied to clipboard"))
+        except Exception as exc:
+            self._show_status(theme.fg("error", f"Clipboard: {exc}"))
 
     def _show_status(self, text: str) -> None:
         if self._status_container is None:

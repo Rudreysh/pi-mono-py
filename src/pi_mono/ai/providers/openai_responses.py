@@ -42,12 +42,25 @@ def resolve_cache_retention(cache_retention: str | None) -> str:
     return "short"
 
 
+def _detect_session_affinity_format(model: Model[str]) -> str:
+    base_url = model.get("baseUrl", "")
+    if "openrouter.ai" in base_url:
+        return "openrouter"
+    return "openai"
+
+
 def get_compat(model: Model[str]) -> OpenAIResponsesCompat:
+    compat = model.get("compat", {})
+    format_val = compat.get("sessionAffinityFormat")
+    if not format_val:
+        if compat.get("sendSessionIdHeader") is False:
+            format_val = "openai-nosession"
+        else:
+            format_val = _detect_session_affinity_format(model)
     return {
-        "sendSessionIdHeader": model.get("compat", {}).get("sendSessionIdHeader", True),
-        "supportsLongCacheRetention": model.get("compat", {}).get(
-            "supportsLongCacheRetention", True
-        ),
+        "sessionAffinityFormat": format_val,
+        "supportsLongCacheRetention": compat.get("supportsLongCacheRetention", True),
+        "sendSessionIdHeader": compat.get("sendSessionIdHeader", True),
     }
 
 
@@ -131,9 +144,13 @@ def _create_client(
         headers.update(copilot_headers)
 
     if session_id:
-        if compat.get("sendSessionIdHeader"):
-            headers["session_id"] = session_id
-        headers["x-client-request-id"] = session_id
+        affinity_format = compat.get("sessionAffinityFormat", "openai")
+        if affinity_format == "openrouter":
+            headers["x-session-id"] = session_id
+        else:
+            if affinity_format == "openai":
+                headers["session_id"] = session_id
+            headers["x-client-request-id"] = session_id
 
     if options_headers:
         headers.update(options_headers)
@@ -241,7 +258,7 @@ def stream_openai_responses(
                 "totalTokens": 0,
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
             },
-            "stopReason": "stop",
+            "stopReason": "pending",
             "timestamp": int(__import__("time").time() * 1000),
         }
 

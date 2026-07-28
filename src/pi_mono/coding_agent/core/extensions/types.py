@@ -235,6 +235,8 @@ class ExtensionContext(Protocol):
     def get_context_usage(self) -> ContextUsage | None: ...
     def compact(self, options: CompactOptions | None = None) -> None: ...
     def get_system_prompt(self) -> str: ...
+    @property
+    def scoped_models(self) -> list[dict[str, Any]]: ...
 
 
 class ExtensionCommandContext(ExtensionContext, Protocol):
@@ -384,6 +386,7 @@ class ExtensionContextActions:
     get_context_usage: Callable[[], ContextUsage | None]
     compact: Callable[[CompactOptions | None], None]
     get_system_prompt: Callable[[], str]
+    get_scoped_models: Callable[[], list[dict[str, Any]]]
     get_system_prompt_options: Callable[[], dict[str, Any]] | None = None
 
 

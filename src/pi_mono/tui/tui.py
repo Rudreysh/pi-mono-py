@@ -45,6 +45,23 @@ KITTY_SEQUENCE_PREFIX = "\x1b_G"
 CURSOR_MARKER = "\x1b_pi:c\x07"
 
 
+def _get_agent_log_dir() -> pathlib.Path:
+    """Return the agent directory for log/crash files.
+
+    Honours PI_CODING_AGENT_DIR and falls back to ``get_agent_dir()`` from
+    ``pi_mono.config`` when available, otherwise ``~/.pi/agent``.
+    """
+    env_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    if env_dir:
+        return pathlib.Path(env_dir).expanduser().resolve()
+    try:
+        from pi_mono.config import get_agent_dir
+
+        return get_agent_dir()
+    except Exception:
+        return pathlib.Path.home() / ".pi" / "agent"
+
+
 @dataclass
 class _PendingOsc11BackgroundQuery:
     settled: bool
@@ -1328,7 +1345,7 @@ class TUI(Container):
         def log_redraw(reason: str) -> None:
             if not debug_redraw:
                 return
-            log_path = pathlib.Path.home() / ".pi" / "agent" / "pi-debug.log"
+            log_path = _get_agent_log_dir() / "pi-debug.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             msg = f"[{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}] fullRender: {reason} (prev={len(self.previous_lines)}, new={len(new_lines)}, height={height})\n"
             with open(log_path, "a") as f:
@@ -1479,7 +1496,7 @@ class TUI(Container):
             line = new_lines[i]
             if not is_image_line(line) and visible_width(line) > width:
                 # Write crash log
-                crash_dir = pathlib.Path.home() / ".pi" / "agent"
+                crash_dir = _get_agent_log_dir()
                 crash_dir.mkdir(parents=True, exist_ok=True)
                 crash_path = crash_dir / "pi-crash.log"
                 crash_data = [

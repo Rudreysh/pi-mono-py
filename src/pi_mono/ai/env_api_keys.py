@@ -24,12 +24,21 @@ def has_vertex_adc_credentials(env: ProviderEnv | None = None) -> bool:
     return _cached_vertex_adc_credentials_exists
 
 
+ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+ANTHROPIC_OAUTH_TOKEN_ENV = "ANTHROPIC_OAUTH_TOKEN"
+ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+
 def get_api_key_env_vars(provider: str) -> list[str] | None:
     if provider == "github-copilot":
         return ["COPILOT_GITHUB_TOKEN"]
 
     if provider == "anthropic":
-        return ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        return [
+            ANTHROPIC_AUTH_TOKEN_ENV,
+            ANTHROPIC_OAUTH_TOKEN_ENV,
+            ANTHROPIC_API_KEY_ENV,
+        ]
 
     env_map = {
         "ant-ling": "ANT_LING_API_KEY",
@@ -67,6 +76,9 @@ def get_api_key_env_vars(provider: str) -> list[str] | None:
         "perplexity": "PERPLEXITY_API_KEY",
         # Session cookie for unofficial Pro web access (optional env fallback).
         "perplexity-pro": "PERPLEXITY_SESSION_TOKEN",
+        "qwen-token-plan": "QWEN_TOKEN_PLAN_API_KEY",
+        "qwen-token-plan-cn": "QWEN_TOKEN_PLAN_CN_API_KEY",
+        "radius": "RADIUS_API_KEY",
     }
 
     env_var = env_map.get(provider)
@@ -85,7 +97,13 @@ def find_env_keys(provider: str, env: ProviderEnv | None = None) -> list[str] | 
 def get_env_api_key(provider: str, env: ProviderEnv | None = None) -> str | None:
     env_keys = find_env_keys(provider, env)
     if env_keys:
-        return get_provider_env_value(env_keys[0], env)
+        # ANTHROPIC_AUTH_TOKEN is bearer-only; do not treat it as x-api-key material.
+        for key in env_keys:
+            if provider == "anthropic" and key == ANTHROPIC_AUTH_TOKEN_ENV:
+                continue
+            value = get_provider_env_value(key, env)
+            if value is not None:
+                return value
 
     if provider == "google-vertex":
         has_credentials = has_vertex_adc_credentials(env)
@@ -121,3 +139,8 @@ def get_env_api_key(provider: str, env: ProviderEnv | None = None) -> str | None
             return "<authenticated>"
 
     return None
+
+
+def get_anthropic_auth_token(env: ProviderEnv | None = None) -> str | None:
+    """Return ANTHROPIC_AUTH_TOKEN for Bearer Authorization headers."""
+    return get_provider_env_value(ANTHROPIC_AUTH_TOKEN_ENV, env)

@@ -55,6 +55,9 @@ default_model_per_provider: dict[KnownProvider, str] = {
     "xiaomi-token-plan-sgp": "mimo-v2.5-pro",
     "perplexity": "sonar-pro",
     "perplexity-pro": "sonnet",
+    "qwen-token-plan": "qwen3-coder",
+    "qwen-token-plan-cn": "qwen3-coder",
+    "radius": "auto",
 }
 
 

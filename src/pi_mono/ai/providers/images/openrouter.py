@@ -107,7 +107,7 @@ async def generate_images_openrouter(
         "provider": model["provider"],
         "model": model["id"],
         "output": [],
-        "stopReason": "stop",
+        "stopReason": "pending",
         "timestamp": int(__import__("time").time() * 1000),
     }
 

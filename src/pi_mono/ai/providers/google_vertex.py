@@ -89,7 +89,7 @@ def stream_google_vertex(
                     "total": 0.0,
                 },
             },
-            "stopReason": "stop",
+            "stopReason": "pending",
             "timestamp": int(time.time() * 1000),
         }
 
@@ -362,6 +362,9 @@ def stream_google_vertex(
             signal = options_dict.get("signal")
             if signal and getattr(signal, "aborted", False):
                 raise ValueError("Request aborted")
+
+            if output.get("stopReason") == "pending":
+                raise ValueError("Stream ended without a stop reason")
 
             if output.get("stopReason") in ("aborted", "error"):
                 raise ValueError("An unknown error occurred")

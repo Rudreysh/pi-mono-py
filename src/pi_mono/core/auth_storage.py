@@ -277,6 +277,25 @@ class AuthStorage:
     def list(self) -> List[str]:
         return list(self.data.keys())
 
+    async def read(self, provider_id: str) -> Optional[Dict[str, Any]]:
+        return self.data.get(provider_id)
+
+    async def modify(
+        self, provider_id: str, fn: Callable[[Optional[Dict[str, Any]]], Any]
+    ) -> Optional[Dict[str, Any]]:
+        current = self.data.get(provider_id)
+        import asyncio
+        if asyncio.iscoroutinefunction(fn):
+            result = await fn(current)
+        else:
+            result = fn(current)
+        if result is not None:
+            self.set(provider_id, result)
+        return result if result is not None else current
+
+    async def delete(self, provider_id: str) -> None:
+        self.remove(provider_id)
+
     def has(self, provider: str) -> bool:
         return provider in self.data
 

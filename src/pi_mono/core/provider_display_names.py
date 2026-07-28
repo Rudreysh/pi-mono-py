@@ -34,4 +34,7 @@ BUILT_IN_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "xiaomi-token-plan-ams": "Xiaomi MiMo Token Plan (Amsterdam)",
     "xiaomi-token-plan-sgp": "Xiaomi MiMo Token Plan (Singapore)",
     "perplexity": "Perplexity",
+    "qwen-token-plan": "Qwen Token Plan",
+    "qwen-token-plan-cn": "Qwen Token Plan (China)",
+    "radius": "Radius Gateway",
 }

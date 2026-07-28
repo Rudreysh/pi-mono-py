@@ -158,6 +158,37 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | Python model catalog sync (`generate_models.py --check`) | **Match** (CI + release publish job) |
 | Real-provider e2e (`PI_E2E_PROVIDER`) | **Partial** | Gated pytest marker in `test_e2e_providers.py` |
 
+## v0.82.1 ports
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| OAuth: OpenRouter PKCE | **Match** | `openrouter.py` with callback server + manual URL paste |
+| OAuth: Kimi Coding device code | **Match** | `kimi_coding.py` RFC 8628 device grant |
+| OAuth: xAI device code | **Match** | `xai.py` device code flow |
+| OAuth: Radius gateway | **Partial** | `radius.py` device-code flow; browser PKCE callback stub |
+| `KnownProvider`: qwen-token-plan, qwen-token-plan-cn, radius | **Match** | Types, env keys, display names, default models |
+| `sessionAffinityFormat` replacing `sendSessionIdHeader` | **Match** | `OpenAIResponsesCompat.sessionAffinityFormat`; old field kept as deprecated alias |
+| `ToolResultMessage.addedToolNames` | **Match** | Optional `list[str]` field |
+| Constrained sampling helpers | **Match** | `constrained_sampling.py`: `supports_grammar_tools`, `supports_strict_tools`, resolve/create helpers |
+| `retry_assistant_call` | **Match** | `retry.py`: policy + callbacks + DNS failure patterns |
+| `bash_execution_update` event | **Match** | Emitted from `execute_bash`; `_bash_session_env` adds PI_SESSION_ID/FILE/PROVIDER/MODEL/REASONING_LEVEL |
+| Remote catalog provider | **Partial** | `remote_catalog_provider.py` ETag-aware refresh skeleton; provider-specific parsing is overridable |
+| Extension `ctx.scoped_models` | **Match** | Property on `ExtensionContext` protocol and runner |
+| `pi auth print-api-key` | **Partial** | `credential_print.py` module; not wired into main CLI parser |
+| Compaction retry events | **Match** | `summarization_retry_scheduled/attempt_start/finished` event types + callback builder |
+| MCP placeholder | **Match** | `mcp/__init__.py` with `McpClient` stub interface |
+
+## v0.82 P2 ports
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Per-request fetch injection (`StreamOptions.fetch`) | **Match** | Optional `fetch` callable on `StreamOptions`; `resolve_httpx_client` helper in `ai/utils/http_client.py` |
+| TUI log directory honours `PI_CODING_AGENT_DIR` | **Match** | `tui.py` debug/crash logs use `get_agent_dir()` instead of hardcoded `~/.pi/agent` |
+| `ToolResultMessage.usage` | **Match** | Optional `Usage` field on `ToolResultMessage` |
+| `app.message.copy` keybinding (Ctrl+X) | **Match** | Default in `DEFAULT_APP_KEYBINDINGS`; handler copies last assistant text to clipboard |
+| Evals stub package | **Partial** | `pi_mono.evals` with placeholder `EvalHarness`; TS vitest harness not ported |
+| Narrow-terminal scroll indicator guard (#7015) | **Match** | `select_list.py` / `settings_list.py` guard `width <= 0` |
+
 ## Known scope gaps
 
 These are intentional port boundaries, not open regression items. They stay **Partial** / **Missing** until explicitly scheduled.

@@ -31,6 +31,7 @@ APP_KEYBINDINGS: dict[str, KeybindingDefinition] = {
         "alt+v" if sys.platform == "win32" else "ctrl+v",
         "Paste image from clipboard",
     ),
+    "app.message.copy": KeybindingDefinition("ctrl+x", "Copy last assistant message"),
     "app.session.new": KeybindingDefinition([], "Start a new session"),
     "app.session.tree": KeybindingDefinition([], "Open session tree"),
     "app.session.fork": KeybindingDefinition([], "Fork current session"),

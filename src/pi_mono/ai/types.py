@@ -60,6 +60,9 @@ KnownProvider = Literal[
     "cursor",
     "perplexity",
     "perplexity-pro",
+    "qwen-token-plan",
+    "qwen-token-plan-cn",
+    "radius",
 ]
 
 Provider = Union[KnownProvider, str]
@@ -104,12 +107,16 @@ class ModelCost(ModelCostRates, total=False):
 
 Transport = Literal["sse", "websocket", "websocket-cached", "auto"]
 
+SessionAffinityFormat = Literal["openai", "openai-nosession", "openrouter"]
+
 
 class OpenAIResponsesCompat(TypedDict, total=False):
     """Compatibility settings for OpenAI Responses APIs."""
 
-    sendSessionIdHeader: bool
+    sessionAffinityFormat: SessionAffinityFormat
     supportsLongCacheRetention: bool
+    # Deprecated: use sessionAffinityFormat instead.
+    sendSessionIdHeader: bool
 
 
 class Model(TypedDict, total=False):
@@ -194,7 +201,7 @@ class TextSignatureV1(TypedDict, total=False):
     phase: Literal["commentary", "final_answer"] | None
 
 
-StopReason = Literal["stop", "length", "toolUse", "error", "aborted"]
+StopReason = Literal["pending", "stop", "length", "toolUse", "error", "aborted"]
 
 
 class AssistantMessage(TypedDict, total=False):
@@ -283,6 +290,10 @@ class StreamOptions(TypedDict, total=False):
     websocketConnectTimeoutMs: int
     maxRetries: int
     maxRetryDelayMs: int
+    # Per-request fetch override. Providers that support it will use this
+    # callable instead of their default HTTP transport. Signature is
+    # intentionally loose to allow httpx.AsyncClient or similar.
+    fetch: Callable[..., Any]
 
 
 class SimpleStreamOptions(StreamOptions, total=False):
@@ -302,8 +313,10 @@ class ToolResultMessage(TypedDict, total=False):
     toolName: str
     content: list[Union[TextContent, ImageContent]]
     details: Any
+    addedToolNames: list[str]
     isError: bool
     timestamp: int
+    usage: Usage
 
 
 Message = Union[UserMessage, AssistantMessage, ToolResultMessage]

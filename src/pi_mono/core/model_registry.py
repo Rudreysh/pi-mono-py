@@ -177,8 +177,12 @@ OpenAICompletionsCompatSchema = {
 OpenAIResponsesCompatSchema = {
     "type": "object",
     "properties": {
-        "sendSessionIdHeader": {"type": "boolean"},
+        "sessionAffinityFormat": {
+            "type": "string",
+            "enum": ["openai", "openai-nosession", "openrouter"],
+        },
         "supportsLongCacheRetention": {"type": "boolean"},
+        "sendSessionIdHeader": {"type": "boolean"},
     },
 }
 

@@ -49,6 +49,16 @@ from pi_mono.coding_agent.core.sdk import (
     create_agent_session_from_services,
     create_agent_session_runtime,
 )
+from pi_mono.coding_agent.core.model_runtime import (
+    CreateModelRuntimeOptions,
+    ModelRuntime,
+    ModelsRefreshResult,
+)
+from pi_mono.coding_agent.core.models_store import (
+    FileModelsStore,
+    InMemoryCodingAgentModelsStore,
+)
+from pi_mono.coding_agent.core.runtime_credentials import RuntimeCredentials
 from pi_mono.coding_agent.core.system_prompt import build_system_prompt
 
 __all__ = [
@@ -87,5 +97,11 @@ __all__ = [
     "create_agent_session",
     "create_agent_session_from_services",
     "create_agent_session_runtime",
+    "CreateModelRuntimeOptions",
+    "ModelRuntime",
+    "ModelsRefreshResult",
+    "FileModelsStore",
+    "InMemoryCodingAgentModelsStore",
+    "RuntimeCredentials",
     "build_system_prompt",
 ]
