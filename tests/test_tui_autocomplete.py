@@ -4,6 +4,7 @@ import tempfile
 import pytest
 from pi_mono.tui.autocomplete import (
     CombinedAutocompleteProvider,
+    SlashCommand,
 )
 from pi_mono.utils.abort_signals import AbortController
 
@@ -65,6 +66,23 @@ async def test_extract_path_prefix_forced_dir():
     # Could be None if /A doesn't match anything, or have /A prefix
     if result is not None:
         assert result.prefix == "/A"
+
+
+@pytest.mark.anyio
+async def test_slash_commands_after_leading_whitespace():
+    # Issue #10218
+    provider = CombinedAutocompleteProvider(
+        [SlashCommand(name="model", description="Switch model")],
+        "/tmp",
+    )
+    lines = ["  /mo"]
+    result = await get_suggestions(provider, lines, 0, len(lines[0]))
+    assert result is not None
+    assert result.prefix == "/mo"
+    assert [item.value for item in result.items] == ["model"]
+
+    applied = provider.apply_completion(lines, 0, len(lines[0]), result.items[0], result.prefix)
+    assert applied["lines"][0].startswith("  /model ")
 
 
 @pytest.mark.anyio

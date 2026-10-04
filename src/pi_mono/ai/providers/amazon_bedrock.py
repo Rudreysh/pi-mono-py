@@ -611,7 +611,26 @@ def get_model_match_candidates(model_id: str, model_name: Optional[str]) -> List
 def supports_adaptive_thinking(model_id: str, model_name: Optional[str]) -> bool:
     candidates = get_model_match_candidates(model_id, model_name)
     return any(
-        "opus-4-6" in s or "opus-4-7" in s or "opus-4-8" in s or "sonnet-4-6" in s
+        "opus-4-6" in s
+        or "opus-4-7" in s
+        or "opus-4-8" in s
+        or "opus-5" in s
+        or "sonnet-4-6" in s
+        or "sonnet-5" in s
+        or "fable-5" in s
+        for s in candidates
+    )
+
+
+def supports_thinking_block_binding(model: Model) -> bool:
+    """Opus 4.6 and Sonnet 4.6 reject thinking.adaptive.block_binding."""
+    candidates = get_model_match_candidates(model["id"], model.get("name"))
+    return any(
+        "opus-4-7" in s
+        or "opus-4-8" in s
+        or "opus-5" in s
+        or "sonnet-5" in s
+        or "fable-5" in s
         for s in candidates
     )
 
@@ -965,17 +984,29 @@ def build_additional_model_request_fields(
         return None
 
     if is_anthropic_claude_model(model):
-        display = (
-            None
-            if is_gov_cloud_bedrock_target(model, options_dict)
-            else options_dict.get("thinkingDisplay", "summarized")
-        )
+        is_gov_cloud = is_gov_cloud_bedrock_target(model, options_dict)
+        display = None if is_gov_cloud else options_dict.get("thinkingDisplay", "summarized")
+        use_block_binding = not is_gov_cloud and supports_thinking_block_binding(model)
         if supports_adaptive_thinking(model["id"], model.get("name")):
+            thinking: Dict[str, Any] = {
+                "type": "adaptive",
+                **({"display": display} if display else {}),
+                **(
+                    {"block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+                    if use_block_binding
+                    else {}
+                ),
+            }
             result: Dict[str, Any] = {
-                "thinking": {"type": "adaptive", **({"display": display} if display else {})},
+                "thinking": thinking,
                 "output_config": {
                     "effort": map_thinking_level_to_effort(model, options_dict.get("reasoning"))
                 },
+                **(
+                    {"anthropic_beta": ["thinking-binding-controls-2026-08-01"]}
+                    if use_block_binding
+                    else {}
+                ),
             }
         else:
             default_budgets: Dict[str, int] = {

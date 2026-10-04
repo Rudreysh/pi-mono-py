@@ -11,6 +11,7 @@ from pi_mono.ai.providers.amazon_bedrock import (
     get_configured_bedrock_region,
     get_standard_bedrock_endpoint_region,
     should_use_explicit_bedrock_endpoint,
+    supports_thinking_block_binding,
 )
 
 
@@ -170,6 +171,34 @@ def test_build_additional_model_request_fields():
     assert fields is not None
     assert "thinking" in fields
     assert fields.get("anthropic_beta") == ["interleaved-thinking-2025-05-14"]
+
+
+def test_adaptive_thinking_drops_stale_blocks():
+    model = {
+        "id": "us.anthropic.claude-opus-4-7-v1:0",
+        "name": "Claude Opus 4.7",
+        "provider": "amazon-bedrock",
+        "reasoning": True,
+    }
+    assert supports_thinking_block_binding(model) is True
+    fields = build_additional_model_request_fields(model, {"reasoning": "high"})
+    assert fields is not None
+    assert fields["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
+    assert fields["anthropic_beta"] == ["thinking-binding-controls-2026-08-01"]
+
+
+def test_opus_46_skips_block_binding():
+    model = {
+        "id": "us.anthropic.claude-opus-4-6-v1:0",
+        "name": "Claude Opus 4.6",
+        "provider": "amazon-bedrock",
+        "reasoning": True,
+    }
+    assert supports_thinking_block_binding(model) is False
+    fields = build_additional_model_request_fields(model, {"reasoning": "high"})
+    assert fields is not None
+    assert "block_binding" not in fields["thinking"]
+    assert "anthropic_beta" not in fields
 
 
 def test_endpoint_and_region_resolution(monkeypatch):

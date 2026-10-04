@@ -173,6 +173,8 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | Z.AI CN `Prompt exceeds max length` | **Match** | `#10208` |
 | `--models` empty/trailing comma | **Match** | `#10334` |
 | `--provider` without `--model` errors | **Match** | `#10236` |
+| Slash autocomplete after leading whitespace | **Match** | `#10218` |
+| Bedrock `thinking.block_binding` drop stale blocks | **Match** | Adaptive models except Opus/Sonnet 4.6 and GovCloud |
 | Default TUI mode fullscreen | **Match** | `tuiMode` unset → fullscreen |
 | `quietStartup: "header"` | **Partial** | Settings + selector; startup banner still a subset of TS |
 | Agent `finishTurn` / `prepareRequest` | **Match** | Replaces `shouldStopAfterTurn` |

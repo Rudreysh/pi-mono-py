@@ -595,14 +595,15 @@ class CombinedAutocompleteProvider:
                 return None
             return AutocompleteSuggestions(suggestions, at_prefix)
 
-        # Check for slash commands
+        # Check for slash commands (leading whitespace is ignored, #10218)
         force = options.get("force", False)
-        if not force and text_before_cursor.startswith("/"):
-            space_index = text_before_cursor.find(" ")
+        command_text = text_before_cursor.lstrip()
+        if not force and command_text.startswith("/"):
+            space_index = command_text.find(" ")
 
             if space_index == -1:
                 # No space - completing command name
-                prefix = text_before_cursor[1:]
+                prefix = command_text[1:]
                 command_items = []
                 for cmd in self.commands:
                     name = cmd.name if hasattr(cmd, "name") else cmd.value
@@ -622,11 +623,11 @@ class CombinedAutocompleteProvider:
                 if not filtered:
                     return None
 
-                return AutocompleteSuggestions(filtered, text_before_cursor)
+                return AutocompleteSuggestions(filtered, command_text)
 
             # Has space - completing command argument
-            command_name = text_before_cursor[1:space_index]
-            argument_text = text_before_cursor[space_index + 1 :]
+            command_name = command_text[1:space_index]
+            argument_text = command_text[space_index + 1 :]
 
             command = None
             for cmd in self.commands:
