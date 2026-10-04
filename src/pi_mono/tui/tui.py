@@ -379,6 +379,7 @@ class TUI(Container):
         self.previous_viewport_top = 0
         self.full_redraw_count = 0
         self.stopped = False
+        self.mode = "regular"
 
         # Overlay stack for modal components rendered on top of base content
         self.focus_order_counter = 0
@@ -825,7 +826,7 @@ class TUI(Container):
             return
         self.terminal.write("\x1b[16t")
 
-    def stop(self) -> None:
+    def stop(self, preserve_screen: bool = False) -> None:
         self.stopped = True
         if self.render_timer:
             self.render_timer.cancel()
@@ -834,7 +835,7 @@ class TUI(Container):
         if self.terminal_color_scheme_notifications_enabled:
             self.terminal.write("\x1b[?2031l")
 
-        if self.previous_lines:
+        if not preserve_screen and self.previous_lines:
             target_row = len(self.previous_lines)
             line_diff = target_row - self.hardware_cursor_row
             if line_diff > 0:
@@ -1278,6 +1279,10 @@ class TUI(Container):
                 return {"row": row, "col": col}
         return None
 
+    def _apply_viewport(self, lines: List[str], width: int, height: int) -> List[str]:
+        del width, height
+        return lines
+
     def do_render(self) -> None:
         if self.stopped:
             return
@@ -1307,6 +1312,8 @@ class TUI(Container):
         # Composite overlays
         if self.overlay_stack:
             new_lines = self.composite_overlays(new_lines, width, height)
+
+        new_lines = self._apply_viewport(new_lines, width, height)
 
         # Extract cursor position
         cursor_pos = self._extract_cursor_position(new_lines, height)

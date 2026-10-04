@@ -60,9 +60,8 @@ def take_over_stdout() -> None:
         callback: object | None = None,
     ) -> bool:
         text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
-        if callable(encoding_or_callback):
-            return raw_stderr_write(text, encoding_or_callback)  # type: ignore[arg-type]
-        return raw_stderr_write(text, callback)  # type: ignore[arg-type]
+        raw_stderr_write(text)
+        return True
 
     sys.stdout.write = redirected_write  # type: ignore[assignment]
     _stdout_takeover_state = {

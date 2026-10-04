@@ -57,6 +57,28 @@ TUI_KEYBINDINGS: Dict[str, KeybindingDefinition] = {
     "tui.select.pageDown": KeybindingDefinition("pageDown", "Selection page down"),
     "tui.select.confirm": KeybindingDefinition("enter", "Confirm selection"),
     "tui.select.cancel": KeybindingDefinition(["escape", "ctrl+c"], "Cancel selection"),
+    "tui.altScreen.pageUp": KeybindingDefinition("pageUp", "Scroll viewport up one page"),
+    "tui.altScreen.pageDown": KeybindingDefinition("pageDown", "Scroll viewport down one page"),
+    "tui.altScreen.halfPageUp": KeybindingDefinition([], "Scroll viewport up half a page"),
+    "tui.altScreen.halfPageDown": KeybindingDefinition([], "Scroll viewport down half a page"),
+    "tui.altScreen.lineUp": KeybindingDefinition([], "Scroll viewport up one line"),
+    "tui.altScreen.lineDown": KeybindingDefinition([], "Scroll viewport down one line"),
+    "tui.altScreen.previousPrompt": KeybindingDefinition(
+        ["ctrl+shift+up", "ctrl+up"], "Jump to previous semantic prompt"
+    ),
+    "tui.altScreen.nextPrompt": KeybindingDefinition(
+        ["ctrl+shift+down", "ctrl+down"], "Jump to next semantic prompt"
+    ),
+    "tui.altScreen.search": KeybindingDefinition("ctrl+shift+f", "Search the primary scroll view"),
+    "tui.altScreen.searchNext": KeybindingDefinition(
+        ["enter", "ctrl+g"], "Select the next search match"
+    ),
+    "tui.altScreen.searchPrevious": KeybindingDefinition(
+        ["shift+enter", "ctrl+shift+g"], "Select the previous search match"
+    ),
+    "tui.altScreen.searchClose": KeybindingDefinition("escape", "Close transcript search"),
+    "tui.altScreen.top": KeybindingDefinition("home", "Scroll viewport to top"),
+    "tui.altScreen.bottom": KeybindingDefinition("end", "Scroll viewport to bottom"),
 }
 
 

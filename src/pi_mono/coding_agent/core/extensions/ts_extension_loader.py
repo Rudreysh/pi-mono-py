@@ -20,6 +20,8 @@ from pi_mono.core.event_bus import EventBusController
 from pi_mono.utils.paths import resolve_path
 
 _HOST_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "ts_extension_host.mjs"
+REQUEST_TIMEOUT_S = 30.0
+STDERR_LIMIT = 8192
 
 
 class TsExtensionHost:
@@ -30,11 +32,65 @@ class TsExtensionHost:
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._exit_task: asyncio.Task[None] | None = None
+        self._stderr_chunks: list[bytes] = []
         self._lock = asyncio.Lock()
 
     @staticmethod
     def is_available() -> bool:
         return shutil.which("node") is not None and _HOST_SCRIPT.is_file()
+
+    def _stderr_text(self) -> str:
+        return b"".join(self._stderr_chunks).decode("utf-8", errors="replace").strip()
+
+    def _fail_pending(self, error: Exception) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
+
+    def _cancel_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _cleanup_process(self) -> None:
+        self._cancel_task(self._reader_task)
+        self._cancel_task(self._stderr_task)
+        self._cancel_task(self._exit_task)
+        if self._process is not None and self._process.returncode is None:
+            self._process.kill()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=1)
+            except (TimeoutError, ProcessLookupError):
+                pass
+        self._process = None
+        self._reader_task = None
+        self._stderr_task = None
+        self._exit_task = None
+
+    async def _read_stderr(self) -> None:
+        if self._process is None or self._process.stderr is None:
+            return
+        total = 0
+        while True:
+            chunk = await self._process.stderr.read(4096)
+            if not chunk:
+                break
+            if total < STDERR_LIMIT:
+                take = chunk[: STDERR_LIMIT - total]
+                self._stderr_chunks.append(take)
+                total += len(take)
+
+    async def _on_process_exit(self) -> None:
+        if self._process is None:
+            return
+        code = await self._process.wait()
+        detail = self._stderr_text()
+        message = f"TypeScript extension host exited with code {code}"
+        if detail:
+            message = f"{message}: {detail}"
+        self._fail_pending(RuntimeError(message))
 
     async def start(self) -> None:
         if self._process is not None and self._process.returncode is None:
@@ -42,11 +98,13 @@ class TsExtensionHost:
         if not self.is_available():
             raise RuntimeError("Node.js or ts_extension_host.mjs is not available")
 
+        await self._cleanup_process()
         env = os.environ.copy()
         repo_root = Path(__file__).resolve().parents[6]
         if (repo_root / "package.json").exists():
             env.setdefault("PI_MONO_ROOT", str(repo_root))
 
+        self._stderr_chunks = []
         self._process = await asyncio.create_subprocess_exec(
             "node",
             str(_HOST_SCRIPT),
@@ -57,24 +115,18 @@ class TsExtensionHost:
         )
         assert self._process.stdout is not None
         self._reader_task = asyncio.create_task(self._read_stdout())
+        self._stderr_task = asyncio.create_task(self._read_stderr())
+        self._exit_task = asyncio.create_task(self._on_process_exit())
 
     async def stop(self) -> None:
         if self._process is None:
             return
-        try:
-            await self.request("shutdown", {})
-        except Exception:
-            pass
         if self._process.returncode is None:
-            self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=2)
-            except TimeoutError:
-                self._process.kill()
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-        self._process = None
-        self._reader_task = None
+                await self.request("shutdown", {})
+            except Exception:
+                pass
+        await self._cleanup_process()
 
     async def _read_stdout(self) -> None:
         if self._process is None or self._process.stdout is None:
@@ -97,19 +149,42 @@ class TsExtensionHost:
                 future.set_exception(RuntimeError(message))
             else:
                 future.set_result(payload.get("result", {}))
+        detail = self._stderr_text()
+        message = "TypeScript extension host closed stdout"
+        if detail:
+            message = f"{message}: {detail}"
+        self._fail_pending(RuntimeError(message))
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
             await self.start()
             assert self._process is not None and self._process.stdin is not None
+            if self._process.returncode is not None:
+                detail = self._stderr_text()
+                message = f"TypeScript extension host exited with code {self._process.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise RuntimeError(message)
             self._request_id += 1
             request_id = self._request_id
             future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._pending[request_id] = future
             payload = json.dumps({"id": request_id, "method": method, "params": params})
-            self._process.stdin.write(f"{payload}\n".encode("utf-8"))
-            await self._process.stdin.drain()
-        return await future
+            try:
+                self._process.stdin.write(f"{payload}\n".encode("utf-8"))
+                await self._process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, RuntimeError) as error:
+                self._pending.pop(request_id, None)
+                detail = self._stderr_text()
+                message = "TypeScript extension host is not accepting requests"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise RuntimeError(message) from error
+        try:
+            return await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT_S)
+        except TimeoutError as error:
+            self._pending.pop(request_id, None)
+            raise RuntimeError("TypeScript extension host timed out") from error
 
 
 _host: TsExtensionHost | None = None

@@ -1,3 +1,5 @@
+import io
+
 import pytest
 
 from pi_mono.utils import clipboard
@@ -41,6 +43,43 @@ def test_read_clipboard_text_xclip_fallback(monkeypatch):
 
     assert clipboard.read_clipboard_text() == "xclip-text"
     assert calls[0][:2] == ["xclip", "-selection"]
+
+
+def test_write_clipboard_text_uses_osc52_in_displayless_linux(monkeypatch) -> None:
+    output = io.StringIO()
+    monkeypatch.setattr(clipboard.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(clipboard.sys, "stdout", output)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+
+    clipboard.write_clipboard_text("hello")
+    assert output.getvalue() == "\x1b]52;c;aGVsbG8=\x07"
+
+
+def test_write_clipboard_text_rejects_oversized_headless_osc52(monkeypatch) -> None:
+    monkeypatch.setattr(clipboard.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _command: None)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+
+    with pytest.raises(RuntimeError, match="OSC 52 size limit"):
+        clipboard.write_clipboard_text("x" * 80_000)
+
+
+def test_write_clipboard_text_prefers_wsl_interop_without_a_display(monkeypatch) -> None:
+    monkeypatch.setattr(clipboard.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(clipboard, "_copy_via_windows_clipboard", lambda text: text == "hello")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+
+    clipboard.write_clipboard_text("hello")
 
 
 @pytest.mark.skipif(

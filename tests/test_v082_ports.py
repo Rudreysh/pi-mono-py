@@ -290,18 +290,16 @@ class TestMcpPlaceholder:
         assert not client.is_connected
 
     @pytest.mark.anyio
-    async def test_mcp_client_raises(self) -> None:
+    async def test_mcp_client_requires_connection(self) -> None:
         from pi_mono.coding_agent.core.mcp import McpClient
 
         client = McpClient()
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="not connected"):
             await client.list_tools()
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="not connected"):
             await client.call_tool("test", {})
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="requires a command"):
             await client.connect({})
-        with pytest.raises(NotImplementedError):
-            await client.disconnect()
 
 
 class TestRemoteCatalogProvider:

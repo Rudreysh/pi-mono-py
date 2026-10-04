@@ -66,6 +66,7 @@ class AgentToolCall(TypedDict):
 class BeforeToolCallResult(TypedDict, total=False):
     block: bool
     reason: str
+    terminate: bool
 
 
 class AfterToolCallResult(TypedDict, total=False):
@@ -120,6 +121,17 @@ class PrepareNextTurnContext(ShouldStopAfterTurnContext):
 
 
 class AgentLoopTurnUpdate(TypedDict, total=False):
+    context: AgentContext
+    model: Model[Any]
+    thinkingLevel: AgentThinkingLevel
+    messages: list["AgentMessage"]
+
+
+class FinishTurnDecision(TypedDict, total=False):
+    action: Literal["end", "continue"]
+
+
+class PrepareRequestContext(TypedDict, total=False):
     context: AgentContext
     model: Model[Any]
     thinkingLevel: AgentThinkingLevel
@@ -269,8 +281,19 @@ class AgentLoopConfig(SimpleStreamOptions, total=False):
         | None
     )
     getApiKey: Callable[[str], Union[str | None, Coroutine[Any, Any, str | None]]] | None
-    shouldStopAfterTurn: (
-        Callable[[ShouldStopAfterTurnContext], Union[bool, Coroutine[Any, Any, bool]]] | None
+    prepareRequest: (
+        Callable[
+            [PrepareRequestContext, AbortSignal | None],
+            Union[AgentLoopTurnUpdate | None, Coroutine[Any, Any, AgentLoopTurnUpdate | None]],
+        ]
+        | None
+    )
+    finishTurn: (
+        Callable[
+            [PrepareNextTurnContext, AbortSignal | None],
+            Union[FinishTurnDecision | None, Coroutine[Any, Any, FinishTurnDecision | None]],
+        ]
+        | None
     )
     prepareNextTurn: (
         Callable[

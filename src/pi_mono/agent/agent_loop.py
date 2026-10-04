@@ -26,7 +26,6 @@ from pi_mono.agent.types import (
     AfterToolCallContext,
     StreamFn,
     PrepareNextTurnContext,
-    ShouldStopAfterTurnContext,
 )
 from pi_mono.utils.abort_signals import AbortSignal
 from pi_mono.utils.event_stream import EventStream
@@ -168,7 +167,8 @@ async def run_loop(
 ) -> None:
     current_context = initial_context
     config = initial_config
-    first_turn = True
+    last_completed_turn: PrepareNextTurnContext | None = None
+    explicit_continuation = False
 
     get_steering = config.get("getSteeringMessages")
     pending_messages: List[AgentMessage] = await maybe_await(get_steering()) if get_steering else []
@@ -177,18 +177,53 @@ async def run_loop(
         has_more_tool_calls = True
 
         while has_more_tool_calls or len(pending_messages) > 0:
-            if not first_turn:
+            prepared_messages: List[AgentMessage] = []
+            if last_completed_turn is not None:
+                prepare_next = config.get("prepareNextTurn")
+                if prepare_next:
+                    next_turn_snapshot = await maybe_await(prepare_next(last_completed_turn))
+                    if next_turn_snapshot:
+                        current_context = next_turn_snapshot.get("context", current_context)
+                        prepared_messages = list(next_turn_snapshot.get("messages") or [])
+                        config = {
+                            **config,
+                            "model": next_turn_snapshot.get("model", config.get("model")),
+                        }
+                        if "thinkingLevel" in next_turn_snapshot:
+                            tl = next_turn_snapshot["thinkingLevel"]
+                            config["reasoning"] = None if tl == "off" else tl  # type: ignore
+                if len(pending_messages) == 0:
+                    pending_messages = await maybe_await(get_steering()) if get_steering else []
                 await maybe_await(emit({"type": "turn_start"}))
-            else:
-                first_turn = False
 
-            if len(pending_messages) > 0:
-                for message in pending_messages:
-                    await maybe_await(emit({"type": "message_start", "message": message}))
-                    await maybe_await(emit({"type": "message_end", "message": message}))
-                    current_context.setdefault("messages", []).append(message)
-                    new_messages.append(message)
-                pending_messages = []
+            for queued in [*prepared_messages, *pending_messages]:
+                await maybe_await(emit({"type": "message_start", "message": queued}))
+                await maybe_await(emit({"type": "message_end", "message": queued}))
+                current_context.setdefault("messages", []).append(queued)
+                new_messages.append(queued)
+            pending_messages = []
+
+            prepare_request = config.get("prepareRequest")
+            if prepare_request:
+                request_update = await maybe_await(
+                    prepare_request(
+                        {
+                            "context": current_context,
+                            "model": config["model"],
+                            "thinkingLevel": config.get("reasoning") or "off",
+                        },
+                        signal,
+                    )
+                )
+                if request_update:
+                    current_context = request_update.get("context", current_context)
+                    config = {
+                        **config,
+                        "model": request_update.get("model", config.get("model")),
+                    }
+                    if "thinkingLevel" in request_update:
+                        tl = request_update["thinkingLevel"]
+                        config["reasoning"] = None if tl == "off" else tl  # type: ignore
 
             message = await stream_assistant_response(
                 current_context, config, signal, emit, stream_fn
@@ -196,6 +231,15 @@ async def run_loop(
             new_messages.append(message)
 
             if message.get("stopReason") in ("error", "aborted"):
+                last_completed_turn = {
+                    "message": message,
+                    "toolResults": [],
+                    "context": current_context,
+                    "newMessages": new_messages,
+                }
+                finish_turn = config.get("finishTurn")
+                if finish_turn:
+                    await maybe_await(finish_turn(last_completed_turn, signal))
                 await maybe_await(emit({"type": "turn_end", "message": message, "toolResults": []}))
                 await maybe_await(emit({"type": "agent_end", "messages": new_messages}))
                 return
@@ -223,48 +267,36 @@ async def run_loop(
                     current_context.setdefault("messages", []).append(result)
                     new_messages.append(result)
 
+            last_completed_turn = {
+                "message": message,
+                "toolResults": tool_results,
+                "context": current_context,
+                "newMessages": new_messages,
+            }
+            finish_turn = config.get("finishTurn")
+            decision = await maybe_await(finish_turn(last_completed_turn, signal)) if finish_turn else None
             await maybe_await(
                 emit({"type": "turn_end", "message": message, "toolResults": tool_results})
             )
 
-            prepare_next = config.get("prepareNextTurn")
-            if prepare_next:
-                next_turn_context: PrepareNextTurnContext = {
-                    "message": message,
-                    "toolResults": tool_results,
-                    "context": current_context,
-                    "newMessages": new_messages,
-                }
-                next_turn_snapshot = await maybe_await(prepare_next(next_turn_context))
-                if next_turn_snapshot:
-                    current_context = next_turn_snapshot.get("context", current_context)
-                    config = {
-                        **config,
-                        "model": next_turn_snapshot.get("model", config.get("model")),
-                    }
-                    if "thinkingLevel" in next_turn_snapshot:
-                        tl = next_turn_snapshot["thinkingLevel"]
-                        config["reasoning"] = None if tl == "off" else tl  # type: ignore
+            if decision and decision.get("action") == "end":
+                await maybe_await(emit({"type": "agent_end", "messages": new_messages}))
+                return
 
-            should_stop = config.get("shouldStopAfterTurn")
-            if should_stop:
-                stop_context: ShouldStopAfterTurnContext = {
-                    "message": message,
-                    "toolResults": tool_results,
-                    "context": current_context,
-                    "newMessages": new_messages,
-                }
-                if await maybe_await(should_stop(stop_context)):
-                    await maybe_await(emit({"type": "agent_end", "messages": new_messages}))
-                    return
-
-            get_steering = config.get("getSteeringMessages")
+            explicit_continuation = bool(decision and decision.get("action") == "continue")
             pending_messages = await maybe_await(get_steering()) if get_steering else []
+            if has_more_tool_calls or len(pending_messages) > 0:
+                explicit_continuation = False
 
         get_followup = config.get("getFollowUpMessages")
         followup_messages = await maybe_await(get_followup()) if get_followup else []
         if len(followup_messages) > 0:
+            explicit_continuation = False
             pending_messages = followup_messages
+            continue
+
+        if explicit_continuation:
+            explicit_continuation = False
             continue
 
         break
@@ -317,6 +349,11 @@ async def stream_assistant_response(
         stream_func(config["model"], llm_context, cast(SimpleStreamOptions, options))
     )
 
+    requested_thinking = config.get("reasoning") or "off"
+
+    def _with_thinking_level(msg: AssistantMessage) -> AssistantMessage:
+        return {**msg, "thinkingLevel": requested_thinking}
+
     partial_message: AssistantMessage | None = None
     added_partial = False
 
@@ -365,7 +402,7 @@ async def stream_assistant_response(
                     )
 
         elif event_type in ("done", "error"):
-            final_message = await response.result()
+            final_message = _with_thinking_level(await response.result())
             if added_partial:
                 context["messages"][-1] = final_message
             else:
@@ -391,7 +428,7 @@ async def stream_assistant_response(
             )
             return final_message
 
-    final_message = await response.result()
+    final_message = _with_thinking_level(await response.result())
     if added_partial:
         context["messages"][-1] = final_message
     else:
@@ -682,11 +719,13 @@ async def prepare_tool_call(
                 }
 
             if before_result and before_result.get("block") is True:
+                result = create_error_tool_result(
+                    before_result.get("reason", "Tool execution was blocked"),
+                    terminate=before_result.get("terminate") is True,
+                )
                 return {
                     "kind": "immediate",
-                    "result": create_error_tool_result(
-                        before_result.get("reason", "Tool execution was blocked")
-                    ),
+                    "result": result,
                     "isError": True,
                 }
 
@@ -797,11 +836,14 @@ async def finalize_executed_tool_call(
     }
 
 
-def create_error_tool_result(message: str) -> AgentToolResult:
-    return {
+def create_error_tool_result(message: str, terminate: bool = False) -> AgentToolResult:
+    result: AgentToolResult = {
         "content": [{"type": "text", "text": message}],
         "details": {},
     }
+    if terminate:
+        result["terminate"] = True
+    return result
 
 
 async def emit_tool_execution_end(finalized: dict, emit: AgentEventSink) -> None:

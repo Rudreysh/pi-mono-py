@@ -78,6 +78,29 @@ def test_parse_source_git():
     assert with_ref.pinned is True
 
 
+def test_package_manager_detects_wrapped_package_managers(package_env):
+    settings_manager = SettingsManager.create(package_env["project_dir"], package_env["agent_dir"])
+    package_manager = DefaultPackageManager(
+        cwd=package_env["project_dir"],
+        agent_dir=package_env["agent_dir"],
+        settings_manager=settings_manager,
+    )
+
+    settings_manager.set_npm_command(["npx", "pnpm"])
+    assert package_manager._get_package_manager_name() == "pnpm"
+    assert package_manager._get_git_dependency_install_args() == [
+        "install",
+        "--prod",
+        "--config.auto-install-peers=false",
+        "--config.strict-peer-dependencies=false",
+        "--config.strict-dep-builds=false",
+    ]
+
+    settings_manager.set_npm_command(["npx", "npm", "pnpm"])
+    with pytest.raises(ValueError, match="Ambiguous npmCommand package managers"):
+        package_manager._get_package_manager_name()
+
+
 @pytest.mark.anyio
 async def test_install_and_remove_local_package_user_scope(package_env, tmp_path):
     source_dir = tmp_path / "my-ext"
@@ -264,3 +287,43 @@ async def test_remove_git_mocked(package_env):
     assert removed is True
     assert not os.path.exists(git_target)
     assert package_manager.list_configured_packages() == []
+
+
+@pytest.mark.anyio
+async def test_temporary_pinned_git_source_uses_a_separate_checkout_per_ref(package_env):
+    manager = SettingsManager.create(package_env["project_dir"], package_env["agent_dir"])
+    package_manager = DefaultPackageManager(
+        cwd=package_env["project_dir"],
+        agent_dir=package_env["agent_dir"],
+        settings_manager=manager,
+    )
+    old_source = parse_source("git:github.com/example/repo@aaaaaaa")
+    new_source = parse_source("git:github.com/example/repo@bbbbbbb")
+    assert isinstance(old_source, GitSource)
+    assert isinstance(new_source, GitSource)
+
+    old_path = package_manager._get_git_install_path(old_source, "temporary")
+    os.makedirs(os.path.join(old_path, "extensions"), exist_ok=True)
+    with open(os.path.join(old_path, "extensions", "old.py"), "w", encoding="utf-8") as handle:
+        handle.write("def default(api):\n    pass\n")
+
+    installed_sources: list[GitSource] = []
+
+    async def install_source(parsed, scope):
+        assert isinstance(parsed, GitSource)
+        assert scope == "temporary"
+        installed_sources.append(parsed)
+        new_path = package_manager._get_git_install_path(parsed, scope)
+        os.makedirs(os.path.join(new_path, "extensions"), exist_ok=True)
+        with open(os.path.join(new_path, "extensions", "new.py"), "w", encoding="utf-8") as handle:
+            handle.write("def default(api):\n    pass\n")
+
+    package_manager._install_parsed_source = install_source  # type: ignore[method-assign]
+    result = await package_manager.resolve_extension_sources(
+        ["git:github.com/example/repo@bbbbbbb"], temporary=True
+    )
+
+    assert old_path != package_manager._get_git_install_path(new_source, "temporary")
+    assert installed_sources == [new_source]
+    assert any(resource["path"].endswith("extensions/new.py") for resource in result["extensions"])
+    assert not any(resource["path"].endswith("extensions/old.py") for resource in result["extensions"])

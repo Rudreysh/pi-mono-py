@@ -10,10 +10,12 @@ import pytest
 
 from pi_mono.coding_agent.core.experimental import are_experimental_features_enabled
 from pi_mono.coding_agent.core.model_resolver import find_exact_model_reference_match
+from pi_mono.coding_agent.core.tools.tool_renderers import render_tool_call
 from pi_mono.coding_agent.modes.interactive.components.footer import FooterComponent
 from pi_mono.coding_agent.modes.interactive.components.model_selector import ModelSelectorComponent
 from pi_mono.coding_agent.utils.clipboard_image import (
     ClipboardImage,
+    _read_clipboard_image_via_xclip,
     read_clipboard_image,
 )
 from pi_mono.tui.fuzzy import fuzzy_filter
@@ -51,6 +53,54 @@ def test_read_clipboard_image_win32_powershell(monkeypatch) -> None:
     )
     image = read_clipboard_image(env={}, platform="win32")
     assert image == ClipboardImage(bytes=png_bytes, mime_type="image/png")
+
+
+def test_xclip_only_reads_advertised_image_targets(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> bytes | None:
+        calls.append(command)
+        if command[-2:] == ["TARGETS", "-o"]:
+            return b"UTF8_STRING\ntext/plain\n"
+        pytest.fail(f"xclip read should not request an unadvertised image target: {command}")
+
+    monkeypatch.setattr("pi_mono.coding_agent.utils.clipboard_image._run_command", fake_run)
+    assert _read_clipboard_image_via_xclip() is None
+    assert calls == [["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]]
+
+
+def test_xclip_reads_the_preferred_advertised_image_target(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> bytes | None:
+        calls.append(command)
+        if command[-2:] == ["TARGETS", "-o"]:
+            return b"image/jpeg\nimage/png\n"
+        if command[-2:] == ["image/png", "-o"]:
+            return b"png-bytes"
+        pytest.fail(f"unexpected xclip command: {command}")
+
+    monkeypatch.setattr("pi_mono.coding_agent.utils.clipboard_image._run_command", fake_run)
+    assert _read_clipboard_image_via_xclip() == ClipboardImage(b"png-bytes", "image/png")
+    assert calls == [
+        ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+    ]
+
+
+def test_read_tool_renderer_hides_null_line_range() -> None:
+    rendered = render_tool_call(
+        "read", {"path": "src/example.py", "offset": None, "limit": None}, "/tmp", expanded=False
+    )
+    assert "src/example.py" in rendered
+    assert "(" not in rendered
+
+
+def test_read_tool_renderer_uses_offset_and_limit_as_a_range() -> None:
+    rendered = render_tool_call(
+        "read", {"path": "src/example.py", "offset": 4, "limit": 3}, "/tmp", expanded=False
+    )
+    assert "(4-6)" in rendered
 
 
 def test_footer_shows_experimental_marker(monkeypatch) -> None:

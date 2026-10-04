@@ -35,15 +35,22 @@ async def load_configured_skills(
     all_diagnostics: list[dict[str, Any]] = []
     collision_diagnostics: list[dict[str, Any]] = []
 
+    def _diagnostic_to_dict(diagnostic: Any) -> dict[str, Any]:
+        if isinstance(diagnostic, dict):
+            return {
+                "type": diagnostic.get("type"),
+                "message": diagnostic.get("message"),
+                "path": diagnostic.get("path"),
+            }
+        return {
+            "type": getattr(diagnostic, "type", None),
+            "message": getattr(diagnostic, "message", None),
+            "path": getattr(diagnostic, "path", None),
+        }
+
     def add_skills(result: dict[str, list[Any]]) -> None:
         for diagnostic in result.get("diagnostics", []):
-            all_diagnostics.append(
-                {
-                    "type": getattr(diagnostic, "type", diagnostic.get("type")),
-                    "message": getattr(diagnostic, "message", diagnostic.get("message")),
-                    "path": getattr(diagnostic, "path", diagnostic.get("path")),
-                }
-            )
+            all_diagnostics.append(_diagnostic_to_dict(diagnostic))
         for skill in result.get("skills", []):
             real_path = os.path.realpath(skill.file_path)
             if real_path in real_paths:

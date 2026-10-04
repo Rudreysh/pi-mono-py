@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
-from pi_mono.coding_agent.core.tools.path_utils import resolve_read_path_async
+from pi_mono.coding_agent.core.tools.path_utils import resolve_execution_cwd, resolve_read_path_async
 from pi_mono.coding_agent.core.tools.truncate import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
@@ -148,10 +148,26 @@ async def _read_image_content(
     model: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     non_vision_image_note = get_non_vision_image_note(model)
+    resize = ((model or {}).get("inputLimits") or {}).get("images", {}).get("resize")
+    resize_options = None
+    if isinstance(resize, dict):
+        resize_options = {
+            key: value
+            for key, value in {
+                "max_width": resize.get("maxWidth"),
+                "max_height": resize.get("maxHeight"),
+                "max_bytes": resize.get("maxBytes"),
+                "jpeg_quality": resize.get("jpegQuality"),
+            }.items()
+            if value is not None
+        } or None
     processed = process_image(
         buffer,
         mime_type,
-        ProcessImageOptions(auto_resize_images=auto_resize_images),
+        ProcessImageOptions(
+            auto_resize_images=auto_resize_images,
+            resize_options=resize_options,
+        ),
     )
     if not processed.ok:
         text_note = f"Read image file [{mime_type}]\n{processed.message}"
@@ -238,7 +254,7 @@ def create_read_tool(cwd: str, options: ReadToolOptions | None = None) -> AgentT
                 raise RuntimeError("Operation aborted")
             model = getattr(ctx, "model", None) if ctx is not None else None
             return await execute_read(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params["path"],
                 params.get("offset"),
                 params.get("limit"),

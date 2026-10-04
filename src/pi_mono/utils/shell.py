@@ -66,6 +66,22 @@ def get_shell_config(custom_shell_path: str | None = None) -> ShellConfig:
     return {"shell": "sh", "args": ["-c"]}
 
 
+POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+
+
+def get_powershell_config() -> ShellConfig:
+    """Resolve PowerShell on Windows, preferring PowerShell 7 when available."""
+    if sys.platform != "win32":
+        raise RuntimeError("The powershell tool is only available on Windows.")
+
+    shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if not shell:
+        raise RuntimeError(
+            "No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH."
+        )
+    return {"shell": shell, "args": list(POWERSHELL_ARGS)}
+
+
 def get_shell_env() -> dict[str, str]:
     """Get process environment with packages bin directory prepended to PATH."""
     bin_dir = str(get_bin_dir())

@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Union, cast
 import httpx
 from anthropic import AsyncAnthropic
 
+from pi_mono.utils.pi_user_agent import get_pi_user_agent
 from pi_mono.ai.models import calculate_cost
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.types import (
     AssistantMessage,
     Context,
@@ -100,23 +102,29 @@ def os_environ_get(key: str) -> Optional[str]:
     return os.environ.get(key)
 
 
-def get_anthropic_compat(model: Model) -> Dict[str, bool]:
+def get_anthropic_compat(model: Model) -> Dict[str, Any]:
     is_fireworks = model.get("provider") == "fireworks"
-    is_cf = model.get("provider") == "cloudflare-ai-gateway" and "anthropic" in (
-        model.get("baseUrl") or ""
-    )
+    base_url = model.get("baseUrl") or ""
+    is_cf = model.get("provider") == "cloudflare-ai-gateway" and "anthropic" in base_url
+    is_openrouter = model.get("provider") == "openrouter" or "openrouter.ai" in base_url
     compat = model.get("compat") or {}
+    send_session_affinity_headers = compat.get("sendSessionAffinityHeaders")
+    if send_session_affinity_headers is None:
+        send_session_affinity_headers = is_fireworks or is_cf or is_openrouter
+    session_affinity_format = compat.get("sessionAffinityFormat")
+    if session_affinity_format is None and is_openrouter:
+        session_affinity_format = "openrouter"
     return {
         "supportsEagerToolInputStreaming": compat.get(
             "supportsEagerToolInputStreaming", not is_fireworks
         ),
         "supportsLongCacheRetention": compat.get("supportsLongCacheRetention", not is_fireworks),
-        "sendSessionAffinityHeaders": compat.get(
-            "sendSessionAffinityHeaders", is_fireworks or is_cf
-        ),
+        "sendSessionAffinityHeaders": send_session_affinity_headers,
+        "sessionAffinityFormat": session_affinity_format,
         "supportsCacheControlOnTools": compat.get("supportsCacheControlOnTools", not is_fireworks),
         "supportsTemperature": compat.get("supportsTemperature", True),
         "allowEmptySignature": compat.get("allowEmptySignature", False),
+        "supportsMidConvoEffort": compat.get("supportsMidConvoEffort", False),
     }
 
 
@@ -218,6 +226,9 @@ def create_client(
         beta_features.append("fine-grained-tool-streaming-2025-05-14")
     if needs_interleaved_beta:
         beta_features.append("interleaved-thinking-2025-05-14")
+    if (model.get("compat") or {}).get("supportsMidConvoEffort") is True:
+        beta_features.append("mid-conversation-output-config-2026-07-01")
+        beta_features.append("thinking-binding-controls-2026-08-01")
 
     # Proxy setup
     proxy_config = create_http_proxy_agents_for_target(
@@ -295,13 +306,17 @@ def create_client(
 
     # API key auth
     compat_res = get_anthropic_compat(model)
-    session_affinity_headers = (
-        {"x-session-affinity": session_id}
-        if session_id and compat_res["sendSessionAffinityHeaders"]
-        else {}
-    )
+    session_affinity_headers: Dict[str, str] = {}
+    if session_id and compat_res["sendSessionAffinityHeaders"]:
+        header_name = (
+            "x-session-id"
+            if compat_res.get("sessionAffinityFormat") == "openrouter"
+            else "x-session-affinity"
+        )
+        session_affinity_headers[header_name] = session_id
     default_headers = merge_headers(
         {
+            "User-Agent": get_pi_user_agent(),
             "accept": "application/json",
             "anthropic-dangerous-direct-browser-access": "true",
             "anthropic-beta": ",".join(beta_features) if beta_features else None,
@@ -319,16 +334,39 @@ def create_client(
     return {"client": client, "isOAuthToken": False}
 
 
+_ANTHROPIC_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _is_anthropic_effort(value: Any) -> bool:
+    return value in _ANTHROPIC_EFFORTS
+
+
 def convert_messages(
     messages: List[Message],
     model: Model,
     is_oauth: bool,
     cache_control: Optional[Dict[str, Any]],
     allow_empty_signature: bool = False,
+    managed_provider: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    converted, _levels = convert_messages_with_levels(
+        messages, model, is_oauth, cache_control, allow_empty_signature, managed_provider
+    )
+    return converted
+
+
+def convert_messages_with_levels(
+    messages: List[Message],
+    model: Model,
+    is_oauth: bool,
+    cache_control: Optional[Dict[str, Any]],
+    allow_empty_signature: bool = False,
+    managed_provider: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Dict[int, str]]:
     # Transform messages for cross-provider compatibility
     transformed = transform_messages(messages, model, normalize_tool_call_id)
     params_messages: List[Dict[str, Any]] = []
+    assistant_levels: Dict[int, str] = {}
 
     i = 0
     while i < len(transformed):
@@ -458,12 +496,21 @@ def convert_messages(
             if not blocks:
                 i += 1
                 continue
+            message_index = len(params_messages)
             params_messages.append(
                 {
                     "role": "assistant",
                     "content": blocks,
                 }
             )
+            historical = msg.get("providerThinkingLevel")
+            if (
+                managed_provider is not None
+                and msg.get("api") == "anthropic-messages"
+                and msg.get("provider") == managed_provider
+                and _is_anthropic_effort(historical)
+            ):
+                assistant_levels[message_index] = str(historical)
 
         elif role == "toolResult":
             # Collect consecutive tool results
@@ -520,7 +567,7 @@ def convert_messages(
                     }
                 ]
 
-    return params_messages
+    return params_messages, assistant_levels
 
 
 def convert_tools(
@@ -581,15 +628,20 @@ def build_params(
     cache_control = cache_res.get("cacheControl")
     compat = get_anthropic_compat(model)
 
+    managed_provider = (
+        model.get("provider") if compat.get("supportsMidConvoEffort") is True else None
+    )
+    converted_messages, assistant_levels = convert_messages_with_levels(
+        context.get("messages", []),
+        model,
+        is_oauth,
+        cache_control,
+        compat["allowEmptySignature"],
+        managed_provider,
+    )
     params: Dict[str, Any] = {
         "model": model["id"],
-        "messages": convert_messages(
-            context.get("messages", []),
-            model,
-            is_oauth,
-            cache_control,
-            compat["allowEmptySignature"],
-        ),
+        "messages": converted_messages,
         "max_tokens": options_dict.get("maxTokens") or model.get("maxTokens", 4096),
         "stream": True,
     }
@@ -623,11 +675,12 @@ def build_params(
             sys_block["cache_control"] = cache_control
         params["system"] = [sys_block]
 
-    # Temperature
+    # Temperature is incompatible with extended thinking and mid-conversation effort.
     thinking_enabled = options_dict.get("thinkingEnabled", False)
     if (
         options_dict.get("temperature") is not None
         and not thinking_enabled
+        and not compat.get("supportsMidConvoEffort")
         and compat["supportsTemperature"]
     ):
         params["temperature"] = options_dict.get("temperature")
@@ -643,7 +696,20 @@ def build_params(
         )
 
     # Extended thinking config
-    if model.get("reasoning"):
+    if compat.get("supportsMidConvoEffort"):
+        display = options_dict.get("thinkingDisplay") or "summarized"
+        params["thinking"] = {
+            "type": "adaptive",
+            "display": display,
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+        }
+        params["output_config"] = {"effort": "high"}
+        params["messages"] = _insert_thinking_level_messages(
+            converted_messages,
+            options_dict.get("effort") or "high",
+            assistant_levels,
+        )
+    elif model.get("reasoning"):
         if thinking_enabled:
             display = options_dict.get("thinkingDisplay") or "summarized"
             force_adaptive = model.get("compat", {}).get("forceAdaptiveThinking") is True
@@ -685,12 +751,18 @@ def stream_anthropic(
     event_stream = AssistantMessageEventStream()
 
     async def run() -> None:
+        provider_thinking_level = (
+            (options or {}).get("effort") or "high"
+            if (model.get("compat") or {}).get("supportsMidConvoEffort")
+            else None
+        )
         output: AssistantMessage = {
             "role": "assistant",
             "content": [],
             "api": model.get("api", "anthropic-messages"),
             "provider": model.get("provider", "anthropic"),
             "model": model["id"],
+            **({"providerThinkingLevel": provider_thinking_level} if provider_thinking_level else {}),
             "usage": {
                 "input": 0,
                 "output": 0,
@@ -792,6 +864,7 @@ def stream_anthropic(
             blocks: List[Any] = cast(List[Any], output["content"])
 
             async for event in async_stream:
+                await emit_provider_stream_event(options_dict, event, model)
                 ev_type = event.type
 
                 if ev_type == "message_start":
@@ -1042,6 +1115,22 @@ def stream_anthropic(
 
     asyncio.create_task(run())
     return event_stream
+
+
+def _insert_thinking_level_messages(
+    messages: List[Dict[str, Any]],
+    active_effort: str,
+    assistant_levels: Optional[Dict[int, str]] = None,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    levels = assistant_levels or {}
+    for index, message in enumerate(messages):
+        historical = levels.get(index)
+        if historical:
+            result.append({"role": "system", "content": [], "output_config": {"effort": historical}})
+        result.append(message)
+    result.append({"role": "system", "content": [], "output_config": {"effort": active_effort}})
+    return result
 
 
 def map_thinking_level_to_effort(model: Model, level: str) -> str:

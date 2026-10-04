@@ -91,6 +91,78 @@ def _template_assets_available() -> bool:
     return (template_dir / "template.html").exists()
 
 
+def _patch_hidden_message_toggle(template_css: str, template_js: str) -> tuple[str, str]:
+    """Apply the export-only upstream toggle while this port consumes the TS template bundle."""
+    if "toggle-hidden-messages" in template_js:
+        return template_css, template_js
+
+    template_css = template_css.replace(
+        "    .hook-message {\n",
+        "    body:not(.show-hidden-messages) .hook-message-hidden {\n"
+        "      display: none;\n"
+        "    }\n\n"
+        "    .hook-message {\n",
+        1,
+    )
+    template_js = template_js.replace(
+        "if (entry.type === 'custom_message' && entry.display) {",
+        "if (entry.type === 'custom_message') {\n"
+        "          const hidden = entry.display === false;",
+        1,
+    )
+    template_js = template_js.replace(
+        '<div class="hook-message" id="${entryDomId}">${tsHtml}',
+        '<div class="hook-message${hidden ? \' hook-message-hidden\' : \'\'}" id="${entryDomId}">${tsHtml}',
+        1,
+    )
+    template_js = template_js.replace(
+        '<div class="hook-type">[${escapeHtml(entry.customType)}]</div>',
+        "<div class=\"hook-type\">[${escapeHtml(entry.customType)}]${hidden ? ' · Hidden in terminal' : ''}</div>",
+        1,
+    )
+    template_js = template_js.replace(
+        "T toggle thinking · O toggle tools",
+        "T toggle thinking · O toggle tools · H toggle hidden messages",
+        1,
+    )
+    template_js = template_js.replace(
+        '<button type="button" class="header-toggle-btn" data-action="toggle-tools" title="Toggle tools (O)">Toggle tools</button>',
+        '<button type="button" class="header-toggle-btn" data-action="toggle-tools" title="Toggle tools (O)">Toggle tools</button>\n'
+        '                <button type="button" class="header-toggle-btn" data-action="toggle-hidden-messages" aria-pressed="${showHiddenMessages}" title="Show custom messages marked as hidden in the terminal (H).">${showHiddenMessages ? \'Hide hidden messages\' : \'Show hidden messages\'}</button>',
+        1,
+    )
+    template_js = template_js.replace(
+        "      let toolOutputsExpanded = false;\n",
+        "      let toolOutputsExpanded = false;\n"
+        "      let showHiddenMessages = false;\n\n"
+        "      function setHiddenMessagesVisible(visible) {\n"
+        "        showHiddenMessages = visible;\n"
+        "        document.body.classList.toggle('show-hidden-messages', visible);\n"
+        "        const button = document.querySelector('[data-action=\"toggle-hidden-messages\"]');\n"
+        "        if (button) {\n"
+        "          button.setAttribute('aria-pressed', String(visible));\n"
+        "          button.textContent = visible ? 'Hide hidden messages' : 'Show hidden messages';\n"
+        "        }\n"
+        "      }\n\n",
+        1,
+    )
+    template_js = template_js.replace(
+        "        document.querySelector('[data-action=\"toggle-tools\"]')?.addEventListener('click', toggleToolOutputs);\n",
+        "        document.querySelector('[data-action=\"toggle-tools\"]')?.addEventListener('click', toggleToolOutputs);\n"
+        "        document.querySelector('[data-action=\"toggle-hidden-messages\"]')?.addEventListener('click', () => {\n"
+        "          setHiddenMessagesVisible(!showHiddenMessages);\n"
+        "        });\n",
+        1,
+    )
+    template_js = template_js.replace(
+        "        } else if (key === 'o') {\n          e.preventDefault();\n          toggleToolOutputs();\n        }\n",
+        "        } else if (key === 'o') {\n          e.preventDefault();\n          toggleToolOutputs();\n"
+        "        } else if (key === 'h') {\n          e.preventDefault();\n          setHiddenMessagesVisible(!showHiddenMessages);\n        }\n",
+        1,
+    )
+    return template_css, template_js
+
+
 def _generate_template_html(session_data: dict[str, Any], theme_name: str | None = None) -> str:
     template_dir = get_export_template_dir()
     template = (template_dir / "template.html").read_text(encoding="utf-8")
@@ -98,6 +170,8 @@ def _generate_template_html(session_data: dict[str, Any], theme_name: str | None
     template_js = (template_dir / "template.js").read_text(encoding="utf-8")
     marked_js = (template_dir / "vendor" / "marked.min.js").read_text(encoding="utf-8")
     hljs_js = (template_dir / "vendor" / "highlight.min.js").read_text(encoding="utf-8")
+
+    template_css, template_js = _patch_hidden_message_toggle(template_css, template_js)
 
     theme_vars = _generate_theme_vars(theme_name)
     session_data_base64 = base64.b64encode(json.dumps(session_data).encode("utf-8")).decode("ascii")

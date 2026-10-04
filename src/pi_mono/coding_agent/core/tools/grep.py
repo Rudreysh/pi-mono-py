@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
-from pi_mono.coding_agent.core.tools.path_utils import resolve_to_cwd
+from pi_mono.coding_agent.core.tools.path_utils import resolve_execution_cwd, resolve_to_cwd
 from pi_mono.coding_agent.core.tools.truncate import (
     GREP_MAX_LINE_LENGTH,
     truncateHead,
@@ -172,9 +172,10 @@ def create_grep_tool(cwd: str, options: GrepToolOptions | None = None) -> AgentT
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
             return await execute_grep(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params["pattern"],
                 params.get("path"),
                 glob=params.get("glob"),

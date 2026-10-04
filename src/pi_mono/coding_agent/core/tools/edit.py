@@ -17,7 +17,7 @@ from pi_mono.coding_agent.core.tools.edit_diff import (
     strip_bom,
 )
 from pi_mono.coding_agent.core.tools.file_mutation_queue import with_file_mutation_queue
-from pi_mono.coding_agent.core.tools.path_utils import resolve_to_cwd
+from pi_mono.coding_agent.core.tools.path_utils import resolve_execution_cwd, resolve_to_cwd
 
 
 class EditOperations(Protocol):
@@ -65,6 +65,14 @@ EDIT_PARAMETERS: dict[str, Any] = {
 }
 
 
+def _is_single_edit_input(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("oldText"), str)
+        and isinstance(value.get("newText"), str)
+    )
+
+
 def _prepare_edit_arguments(params: dict[str, Any]) -> dict[str, Any]:
     edits = params.get("edits")
     if isinstance(edits, str):
@@ -74,10 +82,16 @@ def _prepare_edit_arguments(params: dict[str, Any]) -> dict[str, Any]:
             parsed = json.loads(edits)
             if isinstance(parsed, list):
                 params = {**params, "edits": parsed}
+            elif _is_single_edit_input(parsed):
+                params = {**params, "edits": [parsed]}
         except json.JSONDecodeError:
             pass
+    elif _is_single_edit_input(edits):
+        params = {**params, "edits": [edits]}
     if "oldText" in params and "newText" in params:
         legacy_edits = list(params.get("edits") or [])
+        if not isinstance(legacy_edits, list):
+            legacy_edits = []
         legacy_edits.append({"oldText": params["oldText"], "newText": params["newText"]})
         params = {k: v for k, v in params.items() if k not in ("oldText", "newText")}
         params["edits"] = legacy_edits
@@ -139,7 +153,10 @@ def create_edit_tool(cwd: str, options: EditToolOptions | None = None) -> AgentT
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
-            return await execute_edit(cwd, params, options=opts, signal=signal)
+            return await execute_edit(
+                resolve_execution_cwd(cwd, ctx), params, options=opts, signal=signal
+            )
 
     return EditTool()  # type: ignore[return-value]

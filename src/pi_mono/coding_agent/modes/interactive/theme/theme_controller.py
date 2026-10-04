@@ -43,6 +43,10 @@ class InteractiveThemeController:
         init_theme(self._active_theme_name, enable_watcher=True)
         self._ui.on_terminal_color_scheme_change(self._apply_terminal_theme)
 
+    def rebind_tui(self, ui: Any) -> None:
+        self._ui = ui
+        self._ui.on_terminal_color_scheme_change(self._apply_terminal_theme)
+
     async def apply_from_settings(self) -> None:
         theme_setting = self._settings_manager.get_theme_setting()
         auto_theme = parse_auto_theme_setting(theme_setting)

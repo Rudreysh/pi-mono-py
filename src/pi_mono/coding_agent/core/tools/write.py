@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
 from pi_mono.coding_agent.core.tools.file_mutation_queue import with_file_mutation_queue
-from pi_mono.coding_agent.core.tools.path_utils import resolve_to_cwd
+from pi_mono.coding_agent.core.tools.path_utils import resolve_execution_cwd, resolve_to_cwd
 
 
 class WriteOperations(Protocol):
@@ -63,7 +63,7 @@ async def execute_write(
         await ops.write_file(absolute_path, content)
         return {
             "content": [
-                {"type": "text", "text": f"Successfully wrote {len(content)} bytes to {path}"}
+                {"type": "text", "text": f"Successfully wrote to {path}"}
             ],
             "details": None,
         }
@@ -89,9 +89,10 @@ def create_write_tool(cwd: str, options: WriteToolOptions | None = None) -> Agen
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
             return await execute_write(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params["path"],
                 params["content"],
                 options=opts,

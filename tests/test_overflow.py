@@ -1,4 +1,5 @@
-from pi_mono.utils.overflow import is_context_overflow, get_overflow_patterns
+from pi_mono.ai.utils.overflow import is_context_overflow as is_ai_context_overflow
+from pi_mono.utils.overflow import get_overflow_patterns, is_context_overflow
 
 
 def test_is_context_overflow_error_message():
@@ -14,6 +15,13 @@ def test_is_context_overflow_error_message():
         "errorMessage": "Your input exceeds the context window of this model",
     }
     assert is_context_overflow(msg_openai) is True
+
+    msg_zai = {
+        "stopReason": "error",
+        "errorMessage": '400 {"code":"1261","message":"Prompt too long"}',
+    }
+    assert is_context_overflow(msg_zai) is True
+    assert is_ai_context_overflow(msg_zai) is True
 
     # Does not match overflow patterns
     msg_other = {

@@ -18,6 +18,7 @@ from .tui import (
     SizeValue,
     TUI,
 )
+from .tui_alt_screen import TuiAltScreen
 
 # Editor component interface
 from .editor_component import EditorComponent, BaseEditorComponent
@@ -50,6 +51,7 @@ from .terminal_image import (
     render_image,
     reset_capabilities_cache,
     set_capabilities,
+    set_capability_overrides,
     set_cell_dimensions,
     TerminalCapabilities,
 )
@@ -90,6 +92,7 @@ __all__ = [
     "OverlayUnfocusOptions",
     "SizeValue",
     "TUI",
+    "TuiAltScreen",
     # Editor component
     "EditorComponent",
     "BaseEditorComponent",
@@ -111,6 +114,7 @@ __all__ = [
     "get_png_dimensions",
     "get_webp_dimensions",
     "hyperlink",
+    "set_capability_overrides",
     "ImageCellSize",
     "ImageDimensions",
     "ImageProtocol",

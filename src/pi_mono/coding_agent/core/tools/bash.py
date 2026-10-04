@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
 from pi_mono.coding_agent.core.tools.output_accumulator import OutputAccumulator
+from pi_mono.coding_agent.core.tools.path_utils import resolve_execution_cwd
 from pi_mono.coding_agent.core.tools.truncate import DEFAULT_MAX_BYTES, formatSize
 from pi_mono.utils.child_process import wait_for_child_process
 from pi_mono.utils.shell import (
@@ -35,8 +36,14 @@ class BashOperations(Protocol):
 
 
 class LocalBashOperations:
-    def __init__(self, shell_path: str | None = None) -> None:
+    def __init__(
+        self,
+        shell_path: str | None = None,
+        *,
+        config_factory: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
         self._shell_path = shell_path
+        self._config_factory = config_factory
 
     async def exec(
         self,
@@ -55,7 +62,9 @@ class LocalBashOperations:
         if signal is not None and getattr(signal, "aborted", False):
             raise RuntimeError("aborted")
 
-        shell_config = get_shell_config(self._shell_path)
+        shell_config = (
+            self._config_factory() if self._config_factory is not None else get_shell_config(self._shell_path)
+        )
         command_from_stdin = shell_config.get("commandTransport") == "stdin"
         spawn_args = list(shell_config["args"])
         if not command_from_stdin:
@@ -240,9 +249,10 @@ def create_bash_tool(cwd: str, options: BashToolOptions | None = None) -> AgentT
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
             return await execute_bash(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params["command"],
                 timeout=params.get("timeout"),
                 options=opts,

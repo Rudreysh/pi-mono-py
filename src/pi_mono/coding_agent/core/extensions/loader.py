@@ -88,6 +88,12 @@ class _ExtensionAPI:
         self._runtime.assert_active()
         from pi_mono.coding_agent.core.extensions.types import RegisteredTool
 
+        if not isinstance(tool.parameters, dict):
+            raise TypeError(
+                f'Tool "{tool.name}" registered by extension "{self._extension.path}" '
+                "must define an object parameter schema."
+            )
+
         self._extension.tools[tool.name] = RegisteredTool(
             definition=tool,
             source_info=self._extension.source_info,
@@ -132,6 +138,10 @@ class _ExtensionAPI:
     def register_message_renderer(self, custom_type: str, renderer: Any) -> None:
         self._runtime.assert_active()
         self._extension.message_renderers[custom_type] = renderer
+
+    def register_markdown_transformer(self, transformer: Any) -> None:
+        self._runtime.assert_active()
+        self._extension.markdown_transformer = transformer
 
     def register_entry_renderer(self, custom_type: str, renderer: Any) -> None:
         self._runtime.assert_active()

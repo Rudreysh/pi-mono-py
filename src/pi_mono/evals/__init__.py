@@ -1,20 +1,20 @@
-"""Evals package -- placeholder for the TS ``packages/evals`` vitest harness.
+"""Python eval harness.
 
-The TypeScript eval harness (vitest-based, under ``packages/evals``) has not
-been ported to Python yet.  This module exports a stub ``EvalHarness`` class so
-that downstream code can reference it without import errors.
+Runs named cases against a provided completion callback. This is the Python
+equivalent of the TypeScript vitest eval suite's case runner, not a port of
+the vitest plugin itself.
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
 class EvalCase:
-    """A single evaluation case."""
-
     name: str
     prompt: str
     expected: str | None = None
@@ -23,8 +23,6 @@ class EvalCase:
 
 @dataclass
 class EvalResult:
-    """Result of running one evaluation case."""
-
     case: EvalCase
     passed: bool
     actual: str = ""
@@ -32,30 +30,46 @@ class EvalResult:
     duration_ms: float = 0.0
 
 
+CompleteFn = Callable[[EvalCase], Awaitable[str] | str]
+
+
 class EvalHarness:
-    """Placeholder eval harness.
-
-    Mirrors the shape of the TS ``packages/evals`` vitest harness.  All
-    methods raise ``NotImplementedError`` until a real implementation is
-    ported.
-    """
-
-    def __init__(self, *, name: str = "default") -> None:
+    def __init__(self, complete: CompleteFn | None = None, *, name: str = "evals") -> None:
         self.name = name
-        self._cases: list[EvalCase] = []
+        self._complete = complete
+        self.cases: list[EvalCase] = []
 
     def add_case(self, case: EvalCase) -> None:
-        self._cases.append(case)
+        self.cases.append(case)
 
-    @property
-    def cases(self) -> list[EvalCase]:
-        return list(self._cases)
-
-    async def run(
-        self,
-        *,
-        on_result: Callable[[EvalResult], None] | None = None,
-    ) -> list[EvalResult]:
-        raise NotImplementedError(
-            "EvalHarness.run() is a placeholder; the TS vitest harness is not ported yet"
-        )
+    async def run(self, complete: CompleteFn | None = None) -> list[EvalResult]:
+        runner = complete or self._complete
+        if runner is None:
+            raise ValueError("EvalHarness.run requires a complete callback")
+        results: list[EvalResult] = []
+        for case in self.cases:
+            started = time.perf_counter()
+            try:
+                actual_value = runner(case)
+                if isinstance(actual_value, Awaitable):
+                    actual_value = await actual_value
+                actual = str(actual_value)
+                passed = case.expected is None or case.expected in actual
+                results.append(
+                    EvalResult(
+                        case=case,
+                        passed=passed,
+                        actual=actual,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                    )
+                )
+            except Exception as error:
+                results.append(
+                    EvalResult(
+                        case=case,
+                        passed=False,
+                        error=str(error),
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                    )
+                )
+        return results

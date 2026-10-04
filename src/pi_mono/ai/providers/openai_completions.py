@@ -8,6 +8,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from pi_mono.ai.models import calculate_cost, clamp_thinking_level
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.types import (
     AssistantMessage,
     Context,
@@ -30,9 +31,10 @@ from pi_mono.ai.providers.github_copilot_headers import (
     build_copilot_dynamic_headers,
     has_copilot_vision_input,
 )
-from pi_mono.ai.providers.simple_options import build_base_options
+from pi_mono.ai.providers.simple_options import build_base_options, resolve_sampling_params
 from pi_mono.ai.providers.transform_messages import transform_messages
 from pi_mono.utils.node_http_proxy import create_http_proxy_agents_for_target
+from pi_mono.utils.pi_user_agent import get_pi_user_agent
 
 OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 
@@ -368,6 +370,7 @@ def stream_openai_completions(
                 return block
 
             async for chunk in openai_stream:
+                await emit_provider_stream_event(options_dict, chunk, model)
                 if not chunk:
                     continue
 
@@ -594,6 +597,7 @@ def create_client(
     if compat is None:
         compat = get_compat(model)
     headers = dict(model.get("headers") or {})
+    headers.setdefault("User-Agent", get_pi_user_agent())
 
     if model.get("provider") == "github-copilot":
         has_images = has_copilot_vision_input(context.get("messages", []))
@@ -705,8 +709,11 @@ def build_params(
         apply_anthropic_cache_control(messages, params.get("tools"), cache_control)
 
     tool_choice = options_dict.get("toolChoice")
-    if tool_choice:
+    if tool_choice and (tools and len(tools) > 0):
         params["tool_choice"] = tool_choice
+
+    if compat.get("vllmPriority") is not None:
+        params["priority"] = compat["vllmPriority"]
 
     thinking_format = compat.get("thinkingFormat")
     reasoning_effort = options_dict.get("reasoningEffort")
@@ -779,6 +786,14 @@ def build_params(
             if routing.get("order"):
                 gateway_options["order"] = routing["order"]
             params["providerOptions"] = {"gateway": gateway_options}
+
+    # Last so model and request sampling parameters override named request fields.
+    thinking_level = options_dict.get("reasoningEffort") or "off"
+    sampling_params = resolve_sampling_params(
+        model, thinking_level, options_dict.get("samplingParams")
+    )
+    if sampling_params:
+        params.update(sampling_params)
 
     return params
 
@@ -937,10 +952,13 @@ def convert_messages(
                 content_list: List[Dict[str, Any]] = []
                 for item in cast(List[Any], msg_content or []):
                     if item.get("type") == "text":
+                        text = item.get("text", "")
+                        if not text:
+                            continue
                         content_list.append(
                             {
                                 "type": "text",
-                                "text": sanitize_surrogates(item.get("text", "")),
+                                "text": sanitize_surrogates(text),
                             }
                         )
                     else:
@@ -1312,10 +1330,9 @@ def detect_compat(model: Model) -> Dict[str, Any]:
         "openRouterRouting": {},
         "vercelGatewayRouting": {},
         "zaiToolStream": False,
-        "supportsStrictMode": not is_moonshot
-        and not is_together
-        and not is_cloudflare_ai_gateway
-        and not is_nvidia,
+        # OpenAI compatibility alone does not imply strict JSON-schema tool support.
+        # Generated models opt in explicitly when the endpoint supports it.
+        "supportsStrictMode": False,
         "cacheControlFormat": cache_control_format,
         "sendSessionAffinityHeaders": False,
         "supportsLongCacheRetention": not (

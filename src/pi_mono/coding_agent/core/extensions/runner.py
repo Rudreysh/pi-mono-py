@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import Any, Callable, Literal
 
@@ -143,6 +144,8 @@ class ExtensionRunner:
         self._compact_fn: Callable[[CompactOptions | None], None] = lambda *_a: None
         self._get_system_prompt_fn: Callable[[], str] = lambda: ""
         self._get_system_prompt_options_fn: Callable[[], dict[str, Any]] = lambda: {"cwd": cwd}
+        self._ui_prompt_depth = 0
+        self._active_ui_prompt: dict[str, Any] | None = None
         self._new_session_handler: Callable[[dict[str, Any] | None], Any] = _async_cancelled_false
         self._fork_handler: Callable[[str, dict[str, Any] | None], Any] = (
             _async_cancelled_false_entry
@@ -249,8 +252,86 @@ class ExtensionRunner:
         ui_context: ExtensionUIContext | None = None,
         mode: ExtensionMode = "print",
     ) -> None:
-        self._ui_context = ui_context or NO_OP_UI_CONTEXT
+        self._ui_context = self._wrap_ui_prompt_context(ui_context) if ui_context else NO_OP_UI_CONTEXT
         self._mode = mode
+
+    def _wrap_ui_prompt_context(self, ui: ExtensionUIContext) -> ExtensionUIContext:
+        runner = self
+
+        class _Wrapped:
+            async def select(
+                self, title: str, options: list[str], opts: dict[str, Any] | None = None
+            ) -> str | None:
+                return await runner._with_ui_prompt("select", title, lambda: ui.select(title, options, opts))
+
+            async def confirm(
+                self, title: str, message: str, opts: dict[str, Any] | None = None
+            ) -> bool:
+                return await runner._with_ui_prompt("confirm", title, lambda: ui.confirm(title, message, opts))
+
+            async def input(
+                self,
+                title: str,
+                placeholder: str | None = None,
+                opts: dict[str, Any] | None = None,
+            ) -> str | None:
+                return await runner._with_ui_prompt(
+                    "input", title, lambda: ui.input(title, placeholder, opts)
+                )
+
+            def notify(self, message: str, type: str | None = None) -> None:
+                ui.notify(message, type)  # type: ignore[arg-type]
+
+        return _Wrapped()  # type: ignore[return-value]
+
+    async def _with_ui_prompt(self, kind: str, title: str | None, run: Callable[[], Any]) -> Any:
+        outer_prompt = self._ui_prompt_depth == 0
+        self._ui_prompt_depth += 1
+        if outer_prompt:
+            self._active_ui_prompt = {"kind": kind, "title": title}
+            self._emit_ui_prompt_event(
+                {"type": "ui_prompt_start", "reason": "ui_prompt", "kind": kind, **({"title": title} if title else {})}
+            )
+
+        def finish() -> None:
+            self._ui_prompt_depth -= 1
+            if self._ui_prompt_depth > 0:
+                return
+            self._ui_prompt_depth = 0
+            prompt = self._active_ui_prompt or {"kind": kind, "title": title}
+            self._active_ui_prompt = None
+            event: dict[str, Any] = {
+                "type": "ui_prompt_end",
+                "reason": "ui_prompt",
+                "kind": prompt.get("kind", kind),
+            }
+            prompt_title = prompt.get("title")
+            if prompt_title:
+                event["title"] = prompt_title
+            self._emit_ui_prompt_event(event)
+
+        try:
+            return await _maybe_await(run())
+        finally:
+            finish()
+
+    def _emit_ui_prompt_event(self, event: dict[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _emit() -> None:
+            await self.emit(event)
+
+        loop.create_task(_emit())
+
+    def get_markdown_transformers(self) -> list[Any]:
+        return [
+            extension.markdown_transformer
+            for extension in self._extensions
+            if extension.markdown_transformer is not None
+        ]
 
     def get_ui_context(self) -> ExtensionUIContext:
         return self._ui_context

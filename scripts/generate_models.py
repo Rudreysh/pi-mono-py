@@ -20,7 +20,6 @@ def generate_models(*, run_ts_generate: bool = False, check: bool = False) -> in
         root = _repo_root()
         ai_package = root / "packages" / "ai"
         subprocess.run(["npm", "run", "generate-models"], cwd=ai_package, check=True)
-        subprocess.run(["npm", "run", "generate-image-models"], cwd=ai_package, check=True)
     return sync_models(check=check)
 
 

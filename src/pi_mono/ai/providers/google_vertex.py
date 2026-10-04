@@ -30,6 +30,7 @@ from pi_mono.ai.providers.google_shared import (
     map_tool_choice,
     retain_thought_signature,
 )
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.providers.simple_options import build_base_options
 
 # Counter for generating unique tool call IDs
@@ -129,6 +130,7 @@ def stream_google_vertex(
                 return len(blocks) - 1
 
             async for chunk in google_stream:
+                await emit_provider_stream_event(options_dict, chunk, model)
                 if chunk.response_id:
                     output["responseId"] = chunk.response_id
 

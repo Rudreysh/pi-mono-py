@@ -12,7 +12,7 @@ def detect_supported_image_mime_type(buffer: bytes | bytearray) -> str | None:
         return None if len(data) > 3 and data[3] == 0xF7 else "image/jpeg"
     if _starts_with(data, PNG_SIGNATURE):
         return "image/png" if _is_png(data) and not _is_animated_png(data) else None
-    if _starts_with_ascii(data, 0, "GIF"):
+    if _starts_with_ascii(data, 0, "GIF87a") or _starts_with_ascii(data, 0, "GIF89a"):
         return "image/gif"
     if _starts_with_ascii(data, 0, "RIFF") and _starts_with_ascii(data, 8, "WEBP"):
         return "image/webp"

@@ -20,44 +20,47 @@ default_model_per_provider: dict[KnownProvider, str] = {
     "amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
     "ant-ling": "Ring-2.6-1T",
     "anthropic": "claude-opus-4-8",
-    "openai": "gpt-5.4",
+    "openai": "gpt-5.5",
     "azure-openai-responses": "gpt-5.4",
-    "openai-codex": "gpt-5.5",
-    "nvidia": "nvidia/nemotron-3-super-120b-a12b",
+    "openai-codex": "gpt-6.1-sol",
+    "radius": "balanced",
+    "nvidia": "nvidia/nemotron-3-ultra-550b-a55b",
     "deepseek": "deepseek-v4-pro",
     "google": "gemini-3.1-pro-preview",
     "google-vertex": "gemini-3.1-pro-preview",
     "github-copilot": "gpt-5.4",
     "openrouter": "moonshotai/kimi-k2.6",
     "vercel-ai-gateway": "zai/glm-5.1",
-    "xai": "grok-4.20-0309-reasoning",
+    "xai": "grok-4.7",
     "groq": "openai/gpt-oss-120b",
-    "cerebras": "zai-glm-4.7",
-    "zai": "glm-5.1",
-    "zai-coding-cn": "glm-5.1",
+    "cerebras": "gpt-oss-120b",
+    "zai": "glm-5.3",
+    "zai-coding-cn": "glm-5.3",
     "mistral": "devstral-medium-latest",
     "minimax": "MiniMax-M2.7",
     "minimax-cn": "MiniMax-M2.7",
     "moonshotai": "kimi-k2.6",
     "moonshotai-cn": "kimi-k2.6",
     "huggingface": "moonshotai/Kimi-K2.6",
-    "fireworks": "accounts/fireworks/models/kimi-k2p6",
-    "together": "moonshotai/Kimi-K2.6",
+    "fireworks": "accounts/fireworks/models/kimi-k3",
+    "together": "moonshotai/Kimi-K3",
+    "baseten": "zai-org/GLM-5.2",
     "opencode": "kimi-k2.6",
-    "opencode-go": "kimi-k2.6",
+    "opencode-go": "kimi-k3",
     "kimi-coding": "kimi-for-coding",
+    "meta": "muse-spark-1.3",
     "cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
     "cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
-    "cursor": "auto",
+    "qwen-token-plan": "qwen3.7-max",
+    "qwen-token-plan-cn": "qwen3.7-max",
+    "qwen-token-plan-individual": "qwen3.8-max",
     "xiaomi": "mimo-v2.5-pro",
     "xiaomi-token-plan-cn": "mimo-v2.5-pro",
     "xiaomi-token-plan-ams": "mimo-v2.5-pro",
     "xiaomi-token-plan-sgp": "mimo-v2.5-pro",
+    "cursor": "auto",
     "perplexity": "sonar-pro",
     "perplexity-pro": "sonnet",
-    "qwen-token-plan": "qwen3-coder",
-    "qwen-token-plan-cn": "qwen3-coder",
-    "radius": "auto",
 }
 
 
@@ -281,7 +284,7 @@ def resolve_cli_model(
     cli_model: str | None = None,
     model_registry: ModelRegistry,
 ) -> ResolveCliModelResult:
-    if not cli_model and not cli_provider:
+    if not cli_model:
         return ResolveCliModelResult()
 
     available_models = model_registry.get_all()
@@ -291,37 +294,6 @@ def resolve_cli_model(
         )
 
     provider_map = {model["provider"].lower(): model["provider"] for model in available_models}
-
-    if not cli_model and cli_provider:
-        canonical_provider = provider_map.get(cli_provider.lower())
-        if not canonical_provider:
-            return ResolveCliModelResult(
-                error=(
-                    f'Unknown provider "{cli_provider}". '
-                    "Use --list-models to see available providers/models."
-                )
-            )
-        default_id = default_model_per_provider.get(canonical_provider.lower())
-        if default_id:
-            cli_model = default_id
-        else:
-            provider_models = [
-                model for model in available_models if model["provider"] == canonical_provider
-            ]
-            if len(provider_models) == 1:
-                return ResolveCliModelResult(model=provider_models[0])
-            if provider_models:
-                cli_model = provider_models[0]["id"]
-            else:
-                return ResolveCliModelResult(
-                    error=(
-                        f'No models found for provider "{cli_provider}". '
-                        "Use --list-models to see available providers/models."
-                    )
-                )
-
-    if not cli_model:
-        return ResolveCliModelResult()
 
     provider = provider_map.get(cli_provider.lower()) if cli_provider else None
     if cli_provider and not provider:

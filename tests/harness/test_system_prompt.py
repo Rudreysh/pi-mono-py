@@ -25,8 +25,8 @@ disabledSkill = {
 
 def test_formats_visible_skills_in_order_and_skips_model_disabled_skills():
     expected = (
-        "The following skills provide specialized instructions for specific tasks.\n"
-        "Read the full skill file when the task matches its description.\n"
+        "\n\nThe following skills provide specialized instructions for specific tasks.\n"
+        "Use the read tool to load a skill's file when the task matches its description.\n"
         "When a skill file references a relative path, resolve it against the skill directory "
         "(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n"
         "<available_skills>\n"

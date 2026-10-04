@@ -367,33 +367,40 @@ async def _load_skill_from_file(
         )
         return {"skill": None, "diagnostics": diagnostics}
 
+    is_declared_skill = os.path.basename(file_path) == "SKILL.md"
+
     try:
         parsed = _parse_frontmatter(raw_content)
         if not parsed:
+            if is_declared_skill:
+                diagnostics.append(
+                    SkillDiagnostic(
+                        type="warning",
+                        code="parse_failed",
+                        message="Failed to parse frontmatter",
+                        path=file_path,
+                    )
+                )
+            return {"skill": None, "diagnostics": diagnostics}
+        frontmatter, body = parsed
+    except Exception as e:
+        if is_declared_skill:
             diagnostics.append(
                 SkillDiagnostic(
                     type="warning",
                     code="parse_failed",
-                    message="Failed to parse frontmatter",
+                    message=str(e),
                     path=file_path,
                 )
             )
-            return {"skill": None, "diagnostics": diagnostics}
-        frontmatter, body = parsed
-    except Exception as e:
-        diagnostics.append(
-            SkillDiagnostic(
-                type="warning",
-                code="parse_failed",
-                message=str(e),
-                path=file_path,
-            )
-        )
         return {"skill": None, "diagnostics": diagnostics}
 
     skill_dir = _dirname_env_path(file_path)
     parent_dir_name = _basename_env_path(skill_dir)
     description = frontmatter.get("description")
+    has_description = isinstance(description, str) and description.strip() != ""
+    if not is_declared_skill and not has_description:
+        return {"skill": None, "diagnostics": diagnostics}
 
     for error in _validate_description(description):
         diagnostics.append(

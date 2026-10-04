@@ -42,9 +42,13 @@ class SettingsConfig:
     hide_thinking_block: bool = False
     show_cache_miss_notices: bool = False
     collapse_changelog: bool = False
-    quiet_startup: bool = False
+    quiet_startup: bool | Literal["header"] = False
     tree_filter_mode: TreeFilterMode = "default"
     output_pad: int = 1
+    tui_mode: Literal["regular", "fullscreen"] = "fullscreen"
+    fullscreen_exit_output: Literal["transcript", "resume-hint"] = "transcript"
+    fullscreen_scrollbar: Literal["auto", "always", "hidden"] = "auto"
+    fullscreen_copy_on_select: bool = True
 
 
 class SettingsCallbacks(Protocol):
@@ -68,11 +72,23 @@ class SettingsCallbacks(Protocol):
 
     def on_collapse_changelog_change(self, collapsed: bool) -> None: ...
 
-    def on_quiet_startup_change(self, enabled: bool) -> None: ...
+    def on_quiet_startup_change(self, enabled: bool | Literal["header"]) -> None: ...
 
     def on_tree_filter_mode_change(self, mode: TreeFilterMode) -> None: ...
 
     def on_output_pad_change(self, padding: int) -> None: ...
+
+    def on_tui_mode_change(self, mode: Literal["regular", "fullscreen"]) -> None: ...
+
+    def on_fullscreen_exit_output_change(
+        self, output: Literal["transcript", "resume-hint"]
+    ) -> None: ...
+
+    def on_fullscreen_scrollbar_change(
+        self, mode: Literal["auto", "always", "hidden"]
+    ) -> None: ...
+
+    def on_fullscreen_copy_on_select_change(self, enabled: bool) -> None: ...
 
     def on_cancel(self) -> None: ...
 
@@ -195,9 +211,9 @@ def build_settings_items(config: SettingsConfig) -> list[SettingItem]:
         SettingItem(
             id="quiet-startup",
             label="Quiet startup",
-            description="Suppress non-essential startup messages",
-            current_value="true" if config.quiet_startup else "false",
-            values=["true", "false"],
+            description="Disable verbose printing at startup (header: keep only the startup header)",
+            current_value=str(config.quiet_startup),
+            values=["true", "header", "false"],
         ),
         SettingItem(
             id="tree-filter-mode",
@@ -205,6 +221,34 @@ def build_settings_items(config: SettingsConfig) -> list[SettingItem]:
             description="Default filter for /tree session navigator",
             current_value=config.tree_filter_mode,
             values=["default", "no-tools", "user-only", "labeled-only", "all"],
+        ),
+        SettingItem(
+            id="tui-mode",
+            label="TUI mode",
+            description="Interface layout; fullscreen is the default",
+            current_value=config.tui_mode,
+            values=["regular", "fullscreen"],
+        ),
+        SettingItem(
+            id="fullscreen-exit-output",
+            label="Fullscreen exit output",
+            description="Print the transcript or only a session resume hint when exiting fullscreen mode",
+            current_value=config.fullscreen_exit_output,
+            values=["transcript", "resume-hint"],
+        ),
+        SettingItem(
+            id="fullscreen-scrollbar",
+            label="Fullscreen scrollbar",
+            description="Scrollbar behavior in fullscreen mode; has no effect in regular mode",
+            current_value=config.fullscreen_scrollbar,
+            values=["auto", "always", "hidden"],
+        ),
+        SettingItem(
+            id="fullscreen-copy-on-select",
+            label="Fullscreen copy on select",
+            description="Automatically copy selected text in fullscreen mode",
+            current_value="true" if config.fullscreen_copy_on_select else "false",
+            values=["true", "false"],
         ),
     ]
 
@@ -285,9 +329,19 @@ def handle_settings_change(item_id: str, new_value: str, callbacks: SettingsCall
     elif item_id == "collapse-changelog":
         callbacks.on_collapse_changelog_change(new_value == "true")
     elif item_id == "quiet-startup":
-        callbacks.on_quiet_startup_change(new_value == "true")
+        callbacks.on_quiet_startup_change(
+            "header" if new_value == "header" else new_value == "true"
+        )
     elif item_id == "tree-filter-mode":
         callbacks.on_tree_filter_mode_change(new_value)  # type: ignore[arg-type]
+    elif item_id == "tui-mode":
+        callbacks.on_tui_mode_change(new_value)  # type: ignore[arg-type]
+    elif item_id == "fullscreen-exit-output":
+        callbacks.on_fullscreen_exit_output_change(new_value)  # type: ignore[arg-type]
+    elif item_id == "fullscreen-scrollbar":
+        callbacks.on_fullscreen_scrollbar_change(new_value)  # type: ignore[arg-type]
+    elif item_id == "fullscreen-copy-on-select":
+        callbacks.on_fullscreen_copy_on_select_change(new_value == "true")
 
 
 class SettingsSelectorComponent(Container):
@@ -335,4 +389,8 @@ def build_settings_config_from_session(session: Any) -> SettingsConfig:
         quiet_startup=settings_manager.get_quiet_startup(),
         tree_filter_mode=settings_manager.get_tree_filter_mode(),  # type: ignore[arg-type]
         output_pad=settings_manager.get_output_pad(),
+        tui_mode=settings_manager.get_tui_mode(),
+        fullscreen_exit_output=settings_manager.get_fullscreen_exit_output(),
+        fullscreen_scrollbar=settings_manager.get_fullscreen_scrollbar(),
+        fullscreen_copy_on_select=settings_manager.get_fullscreen_copy_on_select(),
     )

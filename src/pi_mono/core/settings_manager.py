@@ -96,7 +96,7 @@ class Settings(TypedDict, total=False):
     showCacheMissNotices: bool | None
     externalEditor: str | None
     shellPath: str | None
-    quietStartup: bool | None
+    quietStartup: bool | Literal["header"] | None
     shellCommandPrefix: str | None
     npmCommand: list[str] | None
     collapseChangelog: bool | None
@@ -110,6 +110,7 @@ class Settings(TypedDict, total=False):
     terminal: TerminalSettings | None
     images: ImageSettings | None
     enabledModels: list[str] | None
+    defaultTools: list[str] | None
     doubleEscapeAction: Literal["fork", "tree", "none"] | None
     treeFilterMode: Literal["default", "no-tools", "user-only", "labeled-only", "all"] | None
     thinkingBudgets: ThinkingBudgetsSettings | None
@@ -124,6 +125,10 @@ class Settings(TypedDict, total=False):
     httpProxy: str | None
     websocketConnectTimeoutMs: int | None
     defaultProjectTrust: DefaultProjectTrust | None
+    tuiMode: Literal["regular", "fullscreen"] | None
+    fullscreenExitOutput: Literal["transcript", "resume-hint"] | None
+    fullscreenScrollbar: Literal["auto", "always", "hidden"] | None
+    fullscreenCopyOnSelect: bool | None
 
 
 # =============================================================================
@@ -902,10 +907,11 @@ class SettingsManager:
         self._mark_modified("shellPath")
         self.save()
 
-    def get_quiet_startup(self) -> bool:
-        return bool(self.settings.get("quietStartup", False))
+    def get_quiet_startup(self) -> bool | Literal["header"]:
+        value = self.settings.get("quietStartup", False)
+        return value if value is True or value == "header" else False
 
-    def set_quiet_startup(self, quiet: bool) -> None:
+    def set_quiet_startup(self, quiet: bool | Literal["header"]) -> None:
         self.global_settings["quietStartup"] = quiet
         self._mark_modified("quietStartup")
         self.save()
@@ -1110,6 +1116,10 @@ class SettingsManager:
     def get_enabled_models(self) -> list[str] | None:
         return self.settings.get("enabledModels")
 
+    def get_default_tools(self) -> list[str] | None:
+        tools = self.settings.get("defaultTools")
+        return list(tools) if tools else None
+
     def set_enabled_models(self, patterns: list[str] | None) -> None:
         self.global_settings["enabledModels"] = patterns
         self._mark_modified("enabledModels")
@@ -1181,4 +1191,42 @@ class SettingsManager:
     def set_warnings(self, warnings: WarningSettings) -> None:
         self.global_settings["warnings"] = cast(WarningSettings, dict(warnings))
         self._mark_modified("warnings")
+        self.save()
+
+    def get_tui_mode(self) -> Literal["regular", "fullscreen"]:
+        return "regular" if self.settings.get("tuiMode") == "regular" else "fullscreen"
+
+    def set_tui_mode(self, mode: Literal["regular", "fullscreen"]) -> None:
+        self.global_settings["tuiMode"] = mode
+        self._mark_modified("tuiMode")
+        self.save()
+
+    def get_fullscreen_exit_output(self) -> Literal["transcript", "resume-hint"]:
+        return (
+            "resume-hint"
+            if self.settings.get("fullscreenExitOutput") == "resume-hint"
+            else "transcript"
+        )
+
+    def set_fullscreen_exit_output(self, output: Literal["transcript", "resume-hint"]) -> None:
+        self.global_settings["fullscreenExitOutput"] = output
+        self._mark_modified("fullscreenExitOutput")
+        self.save()
+
+    def get_fullscreen_scrollbar(self) -> Literal["auto", "always", "hidden"]:
+        mode = self.settings.get("fullscreenScrollbar")
+        return mode if mode in ("always", "hidden") else "auto"
+
+    def set_fullscreen_scrollbar(self, mode: Literal["auto", "always", "hidden"]) -> None:
+        self.global_settings["fullscreenScrollbar"] = mode
+        self._mark_modified("fullscreenScrollbar")
+        self.save()
+
+    def get_fullscreen_copy_on_select(self) -> bool:
+        value = self.settings.get("fullscreenCopyOnSelect")
+        return True if value is None else bool(value)
+
+    def set_fullscreen_copy_on_select(self, enabled: bool) -> None:
+        self.global_settings["fullscreenCopyOnSelect"] = enabled
+        self._mark_modified("fullscreenCopyOnSelect")
         self.save()

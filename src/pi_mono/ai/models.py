@@ -12,8 +12,50 @@ from pi_mono.ai.models_generated import MODELS
 
 model_registry: dict[str, dict[str, Model]] = {}
 
+_DEFAULT_IMAGE_RESIZE = {
+    "maxWidth": 2000,
+    "maxHeight": 2000,
+    "maxBytes": int(4.5 * 1024 * 1024),
+    "jpegQuality": 80,
+}
+
+
+def _apply_image_input_metadata(model: Model) -> None:
+    if "image" not in model.get("input", []):
+        return
+
+    provider_limits: dict[str, object] = {}
+    provider = model.get("provider")
+    if provider == "anthropic":
+        provider_limits = {
+            "maxRequestBytes": 32 * 1024 * 1024,
+            "images": {"maxPerRequest": 100 if model.get("contextWindow") == 200000 else 600},
+        }
+    elif provider == "amazon-bedrock":
+        provider_limits = {"images": {"maxPerMessage": 20}}
+    elif provider == "openai":
+        provider_limits = {"maxRequestBytes": 512 * 1024 * 1024, "images": {"maxPerRequest": 1500}}
+    elif provider == "google":
+        provider_limits = {"maxRequestBytes": 20 * 1024 * 1024, "images": {"maxPerRequest": 3600}}
+
+    configured = model.get("inputLimits") or {}
+    provider_images = provider_limits.get("images") or {}
+    configured_images = configured.get("images") or {}
+    configured_resize = configured_images.get("resize") or {}
+    model["inputLimits"] = {
+        **provider_limits,
+        **configured,
+        "images": {
+            **provider_images,
+            **configured_images,
+            "resize": {**_DEFAULT_IMAGE_RESIZE, **configured_resize},
+        },
+    }
+
 # Initialize registry
 for provider, models in MODELS.items():
+    for model in models.values():
+        _apply_image_input_metadata(model)
     model_registry[provider] = {id: m for id, m in models.items()}
 
 # Python-only Perplexity Pro subscription catalog (web session, not official API).

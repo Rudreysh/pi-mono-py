@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
-from pi_mono.coding_agent.core.tools.path_utils import path_exists, resolve_to_cwd
+from pi_mono.coding_agent.core.tools.path_utils import path_exists, resolve_execution_cwd, resolve_to_cwd
 from pi_mono.coding_agent.core.tools.truncate import DEFAULT_MAX_BYTES, formatSize, truncateHead
 
 DEFAULT_LIMIT = 500
@@ -110,9 +110,10 @@ def create_ls_tool(cwd: str, options: LsToolOptions | None = None) -> AgentTool:
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
             return await execute_ls(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params.get("path"),
                 limit=params.get("limit"),
                 options=opts,

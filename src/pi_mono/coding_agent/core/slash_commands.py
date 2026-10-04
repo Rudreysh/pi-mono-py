@@ -32,6 +32,10 @@ BUILTIN_SLASH_COMMANDS: tuple[BuiltinSlashCommand, ...] = (
         "Select model (provider list, then models; or /model provider/id)",
     ),
     BuiltinSlashCommand(
+        "thinking",
+        "Select thinking level (or /thinking <level>)",
+    ),
+    BuiltinSlashCommand(
         "provider",
         "Select provider first, then a model from that provider",
     ),

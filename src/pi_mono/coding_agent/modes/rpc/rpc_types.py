@@ -68,6 +68,11 @@ class RpcAbortCommand(TypedDict, total=False):
     type: Literal["abort"]
 
 
+class RpcClearQueueCommand(TypedDict, total=False):
+    id: str | None
+    type: Literal["clear_queue"]
+
+
 class RpcNewSessionCommand(TypedDict, total=False):
     id: str | None
     type: Literal["new_session"]
@@ -205,6 +210,7 @@ RpcCommand = Union[
     RpcSteerCommand,
     RpcFollowUpCommand,
     RpcAbortCommand,
+    RpcClearQueueCommand,
     RpcNewSessionCommand,
     RpcGetStateCommand,
     RpcSetModelCommand,

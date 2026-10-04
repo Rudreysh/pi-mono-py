@@ -57,3 +57,18 @@ def test_resolve_cli_model_openrouter_free_model_not_in_registry() -> None:
     assert result.model is not None
     assert result.model["provider"] == "openrouter"
     assert result.model["id"] == "openai/gpt-oss-20b:free"
+
+
+def test_resolve_cli_model_provider_without_model_does_not_pick_default() -> None:
+    # Issue #10236
+    models = [_openrouter_model("moonshotai/kimi-k2.6")]
+    registry = _Registry(models)
+
+    result = resolve_cli_model(
+        cli_provider="openrouter",
+        cli_model=None,
+        model_registry=registry,  # type: ignore[arg-type]
+    )
+
+    assert result.model is None
+    assert result.error is None

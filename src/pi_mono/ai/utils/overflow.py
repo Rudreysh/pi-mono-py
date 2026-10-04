@@ -6,7 +6,8 @@ from pi_mono.ai.types import AssistantMessage
 
 # Regex patterns to detect context overflow errors from different providers
 OVERFLOW_PATTERNS: list[re.Pattern] = [
-    re.compile(r"prompt is too long", re.IGNORECASE),  # Anthropic token overflow
+    re.compile(r"prompt (?:is )?too long", re.IGNORECASE),  # Anthropic and z.ai token overflow
+    re.compile(r"prompt exceeds max length", re.IGNORECASE),  # z.ai CN endpoint
     re.compile(
         r"request_too_large", re.IGNORECASE
     ),  # Anthropic request byte-size overflow (HTTP 413)
@@ -15,7 +16,8 @@ OVERFLOW_PATTERNS: list[re.Pattern] = [
         r"exceeds the context window", re.IGNORECASE
     ),  # OpenAI (Completions & Responses API)
     re.compile(
-        r"exceeds (?:the )?(?:model'?s )?maximum context length of [\d,]+ tokens?", re.IGNORECASE
+        r"exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))",
+        re.IGNORECASE,
     ),  # OpenAI-compatible proxies (LiteLLM)
     re.compile(r"input token count.*exceeds the maximum", re.IGNORECASE),  # Google (Gemini)
     re.compile(r"maximum prompt length is \d+", re.IGNORECASE),  # xAI (Grok)
@@ -36,10 +38,15 @@ OVERFLOW_PATTERNS: list[re.Pattern] = [
     re.compile(r"context window exceeds limit", re.IGNORECASE),  # MiniMax
     re.compile(r"exceeded model token limit", re.IGNORECASE),  # Kimi For Coding
     re.compile(r"too large for model with \d+ maximum context length", re.IGNORECASE),  # Mistral
+    re.compile(
+        r"prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?",
+        re.IGNORECASE,
+    ),  # DS4 server
     re.compile(r"model_context_window_exceeded", re.IGNORECASE),  # z.ai non-standard finish_reason
     re.compile(
         r"prompt too long; exceeded (?:max )?context length", re.IGNORECASE
     ),  # Ollama explicit overflow error
+    re.compile(r"range of input length should be", re.IGNORECASE),  # DashScope / Qwen Token Plan
     re.compile(r"context[_ ]length[_ ]exceeded", re.IGNORECASE),  # Generic fallback
     re.compile(r"too many tokens", re.IGNORECASE),  # Generic fallback
     re.compile(r"token limit exceeded", re.IGNORECASE),  # Generic fallback

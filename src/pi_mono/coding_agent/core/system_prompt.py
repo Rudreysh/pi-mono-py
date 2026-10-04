@@ -9,6 +9,14 @@ from pi_mono.agent.harness.types import Skill
 from pi_mono.config import get_docs_path, get_examples_path, get_readme_path
 
 
+def _skill_file_read_tool(selected_tools: list[str] | None) -> str | None:
+    tools = selected_tools or ["read", "bash", "edit", "write"]
+    for name in ("read", "bash"):
+        if name in tools:
+            return name
+    return None
+
+
 def build_system_prompt(
     *,
     custom_prompt: str | None = None,
@@ -39,9 +47,11 @@ def build_system_prompt(
                     f"{file_entry['content']}\n</project_instructions>\n\n"
                 )
             prompt += "</project_context>\n"
-        custom_prompt_has_read = not selected_tools or "read" in selected_tools
-        if custom_prompt_has_read and resolved_skills:
-            prompt += format_skills_for_system_prompt(resolved_skills)
+        custom_prompt_has_file_read = _skill_file_read_tool(selected_tools)
+        if custom_prompt_has_file_read and resolved_skills:
+            prompt += format_skills_for_system_prompt(
+                resolved_skills, custom_prompt_has_file_read
+            )
         prompt += f"\nCurrent date: {date}"
         prompt += f"\nCurrent working directory: {prompt_cwd}"
         return prompt
@@ -67,13 +77,17 @@ def build_system_prompt(
         guidelines_list.append(guideline)
 
     has_bash = "bash" in tools
+    has_powershell = "powershell" in tools
     has_grep = "grep" in tools
     has_find = "find" in tools
     has_ls = "ls" in tools
-    has_read = "read" in tools
 
     if has_bash and not has_grep and not has_find and not has_ls:
         add_guideline("Use bash for file operations like ls, rg, find")
+    if has_powershell:
+        add_guideline(
+            "You can inspect PI_* environment variables for current model and session details."
+        )
 
     for guideline in prompt_guidelines or []:
         normalized = guideline.strip()
@@ -116,8 +130,9 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
             )
         prompt += "</project_context>\n"
 
-    if has_read and resolved_skills:
-        prompt += format_skills_for_system_prompt(resolved_skills)
+    skill_file_read_tool = _skill_file_read_tool(tools)
+    if skill_file_read_tool and resolved_skills:
+        prompt += format_skills_for_system_prompt(resolved_skills, skill_file_read_tool)
 
     prompt += f"\nCurrent date: {date}"
     prompt += f"\nCurrent working directory: {prompt_cwd}"

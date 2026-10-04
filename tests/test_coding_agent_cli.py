@@ -45,6 +45,28 @@ def test_parse_args_file_args():
     assert parsed.messages == ["summarize this"]
 
 
+def test_load_configured_skills_accepts_object_diagnostics(tmp_path):
+    import asyncio
+
+    from pi_mono.coding_agent.core.skills import load_configured_skills
+
+    skills_dir = tmp_path / "skills" / "broken"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("not valid frontmatter\n", encoding="utf-8")
+
+    async def run():
+        result = await load_configured_skills(
+            cwd=str(tmp_path),
+            agent_dir=str(tmp_path / "agent"),
+            skill_paths=[str(tmp_path / "skills")],
+        )
+        assert "diagnostics" in result
+        return result
+
+    result = asyncio.run(run())
+    assert isinstance(result["diagnostics"], list)
+
+
 def test_read_piped_stdin_nonblocking_without_data(monkeypatch):
     import asyncio
     from io import StringIO

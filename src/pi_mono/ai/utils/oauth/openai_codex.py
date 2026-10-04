@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from pi_mono.utils.abort_signals import is_aborted
 from pi_mono.ai.utils.oauth.device_code import poll_oauth_device_code_flow
 from pi_mono.ai.utils.oauth.oauth_page import oauth_error_html, oauth_success_html
 from pi_mono.ai.utils.oauth.pkce import generate_pkce
@@ -84,7 +85,7 @@ def _decode_jwt(token: str) -> dict[str, Any] | None:
 
 
 def _is_aborted(signal: Any | None) -> bool:
-    return bool(signal and signal.get("aborted"))
+    return is_aborted(signal)
 
 
 async def _fetch_with_login_cancellation(
@@ -356,8 +357,14 @@ async def _start_local_oauth_server(state: str) -> _OAuthServerInfo:
     result_future: asyncio.Future[dict[str, str] | None] = loop.create_future()
 
     def settle_wait(value: dict[str, str] | None) -> None:
-        if not result_future.done():
-            result_future.set_result(value)
+        def _set() -> None:
+            if not result_future.done():
+                result_future.set_result(value)
+
+        try:
+            loop.call_soon_threadsafe(_set)
+        except RuntimeError:
+            _set()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:

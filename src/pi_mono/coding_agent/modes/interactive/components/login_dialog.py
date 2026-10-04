@@ -65,6 +65,7 @@ class LoginDialogComponent(Container):
 
         self._input.on_submit = self._submit_input
         self._input.on_escape = self.cancel
+        self._input.on_paste = self._submit_pasted_oauth_callback
 
     @property
     def signal(self) -> _AbortSignal:
@@ -136,6 +137,7 @@ class LoginDialogComponent(Container):
                 padding_y=0,
             )
         )
+        self._input.set_value("")
         self._ui.request_render()
 
         def resolve(value: str) -> None:
@@ -229,6 +231,13 @@ class LoginDialogComponent(Container):
         self._input_resolver(resolved)
         self._input_resolver = None
         self._input_rejecter = None
+
+    def _submit_pasted_oauth_callback(self, _pasted: str) -> None:
+        if self._input_resolver is None:
+            return
+        value = self._input.get_value().strip()
+        if "code=" in value and "state=" in value:
+            self._submit_input(value)
 
     def handle_input(self, data: str) -> None:
         kb = get_keybindings()

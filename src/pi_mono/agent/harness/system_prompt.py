@@ -1,7 +1,9 @@
 from pi_mono.agent.harness.types import Skill
 
 
-def format_skills_for_system_prompt(skills: list[Skill]) -> str:
+def format_skills_for_system_prompt(
+    skills: list[Skill], file_read_tool: str = "read"
+) -> str:
     visible_skills = []
     for s in skills:
         disable = False
@@ -15,9 +17,14 @@ def format_skills_for_system_prompt(skills: list[Skill]) -> str:
     if not visible_skills:
         return ""
 
+    read_instruction = (
+        "Use the read tool to load a skill's file when the task matches its description."
+        if file_read_tool == "read"
+        else "Use bash to load a skill's file when the task matches its description."
+    )
     lines = [
-        "The following skills provide specialized instructions for specific tasks.",
-        "Read the full skill file when the task matches its description.",
+        "\n\nThe following skills provide specialized instructions for specific tasks.",
+        read_instruction,
         "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
         "",
         "<available_skills>",

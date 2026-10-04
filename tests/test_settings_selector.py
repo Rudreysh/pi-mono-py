@@ -33,6 +33,10 @@ def test_build_settings_items_includes_core_subset():
         "collapse-changelog",
         "quiet-startup",
         "tree-filter-mode",
+        "tui-mode",
+        "fullscreen-exit-output",
+        "fullscreen-scrollbar",
+        "fullscreen-copy-on-select",
     ]
     assert next(item for item in items if item.id == "autocompact").current_value == "true"
     assert next(item for item in items if item.id == "show-images").current_value == "false"

@@ -1,4 +1,4 @@
-from pi_mono.utils.abort_signals import AbortController, combine_abort_signals
+from pi_mono.utils.abort_signals import AbortController, combine_abort_signals, is_aborted
 
 
 def test_abort_controller_basic():
@@ -94,3 +94,12 @@ def test_combine_abort_signals_multiple():
 
     # Cleanup should run without error
     combined["cleanup"]()
+
+
+def test_is_aborted_accepts_abort_signal_and_dict():
+    controller = AbortController()
+    assert is_aborted(None) is False
+    assert is_aborted(controller.signal) is False
+    assert is_aborted({"aborted": True}) is True
+    controller.abort()
+    assert is_aborted(controller.signal) is True

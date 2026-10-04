@@ -1,13 +1,17 @@
 import pytest
 from unittest import mock
 from pi_mono.ai.providers.anthropic import (
-    to_claude_code_name,
+    build_params,
+    convert_messages,
+    convert_messages_with_levels,
+    convert_tools,
+    create_client,
     from_claude_code_name,
+    get_anthropic_compat,
     is_oauth_token,
     map_stop_reason,
-    convert_messages,
-    convert_tools,
     stream_anthropic,
+    to_claude_code_name,
 )
 
 
@@ -162,6 +166,11 @@ class MockTextDelta:
         self.text = text
 
 
+class MockMessageDelta:
+    def __init__(self, stop_reason="end_turn"):
+        self.stop_reason = stop_reason
+
+
 class MockStream:
     def __init__(self, events):
         self.events = events
@@ -193,7 +202,7 @@ async def test_stream_anthropic():
         MockEvent("content_block_start", index=0, content_block=mock.Mock(type="text")),
         MockEvent("content_block_delta", index=0, delta=MockTextDelta("Hello")),
         MockEvent("content_block_stop", index=0),
-        MockEvent("message_delta", usage=usage),
+        MockEvent("message_delta", usage=usage, delta=MockMessageDelta("end_turn")),
     ]
 
     mock_client = mock.MagicMock()
@@ -211,3 +220,118 @@ async def test_stream_anthropic():
         assert received_events[-1]["type"] == "done"
         assert received_events[-1]["message"]["responseId"] == "msg_123"
         assert received_events[-1]["message"]["content"][0]["text"] == "Hello"
+
+
+def test_convert_messages_with_levels_tracks_historical_effort():
+    model = {
+        "id": "claude-opus-4-7",
+        "provider": "anthropic",
+        "api": "anthropic-messages",
+        "compat": {"supportsMidConvoEffort": True},
+    }
+    messages = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "provider": "anthropic",
+            "api": "anthropic-messages",
+            "providerThinkingLevel": "low",
+            "content": [{"type": "text", "text": "Hi"}],
+        },
+    ]
+    converted, levels = convert_messages_with_levels(
+        messages, model, is_oauth=False, cache_control=None, managed_provider="anthropic"
+    )
+    assert converted[1]["role"] == "assistant"
+    assert levels[1] == "low"
+
+
+def test_build_params_mid_convo_uses_high_output_config_and_trailing_effort():
+    model = {
+        "id": "claude-opus-4-7",
+        "provider": "anthropic",
+        "api": "anthropic-messages",
+        "maxTokens": 4096,
+        "compat": {"supportsMidConvoEffort": True},
+    }
+    context = {
+        "systemPrompt": "sys",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "provider": "anthropic",
+                "api": "anthropic-messages",
+                "providerThinkingLevel": "low",
+                "content": [{"type": "text", "text": "Hi"}],
+            },
+            {"role": "user", "content": "again"},
+        ],
+    }
+    params = build_params(model, context, is_oauth=False, options={"effort": "medium"})
+    assert params["output_config"] == {"effort": "high"}
+    system_efforts = [
+        msg["output_config"]["effort"]
+        for msg in params["messages"]
+        if msg.get("role") == "system" and msg.get("output_config")
+    ]
+    assert system_efforts[0] == "low"
+    assert system_efforts[-1] == "medium"
+
+
+def test_create_client_adds_mid_convo_betas():
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["headers"] = kwargs.get("default_headers")
+
+    with mock.patch("pi_mono.ai.providers.anthropic.AsyncAnthropic", FakeClient):
+        create_client(
+            {
+                "id": "claude-opus-4-7",
+                "provider": "anthropic",
+                "compat": {"supportsMidConvoEffort": True},
+            },
+            "sk-ant-api-test",
+            interleaved_thinking=False,
+            use_beta_tool_streaming=False,
+        )
+    beta = captured["headers"]["anthropic-beta"]
+    assert "mid-conversation-output-config-2026-07-01" in beta
+    assert "thinking-binding-controls-2026-08-01" in beta
+
+
+def test_create_client_uses_openrouter_session_id_header():
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["headers"] = kwargs["default_headers"]
+
+    model = {
+        "id": "anthropic/claude-sonnet-4.6",
+        "provider": "openrouter",
+        "baseUrl": "https://openrouter.ai/api/v1",
+    }
+    with mock.patch("pi_mono.ai.providers.anthropic.AsyncAnthropic", FakeClient):
+        create_client(
+            model,
+            "test-key",
+            interleaved_thinking=False,
+            use_beta_tool_streaming=False,
+            session_id="session-123",
+        )
+
+    assert captured["headers"]["x-session-id"] == "session-123"
+    assert "x-session-affinity" not in captured["headers"]
+
+
+def test_openrouter_session_affinity_can_be_disabled():
+    model = {
+        "id": "anthropic/claude-sonnet-4.6",
+        "provider": "openrouter",
+        "compat": {"sendSessionAffinityHeaders": False},
+    }
+
+    assert get_anthropic_compat(model)["sendSessionAffinityHeaders"] is False

@@ -1,16 +1,7 @@
 # pi_mono.evals
 
-Placeholder for the TypeScript `packages/evals` vitest harness.
+Python eval harness for running named cases against a completion callback.
 
-The TS eval harness uses vitest fixtures, provider mocking, and
-`packages/coding-agent/test/suite/harness.ts` to run structured model
-evaluations.  That infrastructure has **not been ported to Python** yet.
-
-This package exports a stub `EvalHarness` class so downstream code can
-reference it without import errors.  Calling `EvalHarness.run()` raises
-`NotImplementedError`.
-
-## When will this be ported?
-
-No timeline.  If you need Python-native evals, build on pytest and the
-faux provider in `python/tests/` for now.
+This is not a port of the TypeScript vitest plugin. It covers the case-runner
+shape used by `packages/evals`: add cases, run them, collect pass/fail plus
+duration. Wire a faux provider or any async complete function.

@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_mono.agent.types import AgentTool, AgentToolResult
-from pi_mono.coding_agent.core.tools.path_utils import path_exists, resolve_to_cwd, to_posix_path
+from pi_mono.coding_agent.core.tools.path_utils import (
+    path_exists,
+    resolve_execution_cwd,
+    resolve_to_cwd,
+    to_posix_path,
+)
 from pi_mono.coding_agent.core.tools.truncate import DEFAULT_MAX_BYTES, formatSize, truncateHead
 from pi_mono.coding_agent.utils.tools_manager import ensure_tool, get_tool_path
 
@@ -179,9 +184,10 @@ def create_find_tool(cwd: str, options: FindToolOptions | None = None) -> AgentT
             params: dict[str, Any],
             signal: Any = None,
             on_update: Any = None,
+            ctx: Any = None,
         ) -> AgentToolResult:
             return await execute_find(
-                cwd,
+                resolve_execution_cwd(cwd, ctx),
                 params["pattern"],
                 params.get("path"),
                 limit=params.get("limit"),

@@ -12,7 +12,11 @@ from typing import Any
 
 from pi_mono.agent.types import AgentEvent, ThinkingLevel
 from pi_mono.ai.types import ImageContent
-from pi_mono.coding_agent.core.agent_session import SessionStats
+from pi_mono.coding_agent.core.agent_session import (
+    PromptDisposition,
+    QueuedInputDisposition,
+    SessionStats,
+)
 from pi_mono.coding_agent.core.bash_executor import BashResult
 from pi_mono.coding_agent.modes.rpc.jsonl import JsonlLineReader, serialize_json_line
 from pi_mono.coding_agent.modes.rpc.rpc_types import RpcResponse, RpcSessionState, RpcSlashCommand
@@ -123,23 +127,34 @@ class RpcClient:
     def get_stderr(self) -> str:
         return self._stderr
 
-    async def prompt(self, message: str, images: list[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        message: str,
+        images: list[ImageContent] | None = None,
+        streaming_behavior: str | None = None,
+    ) -> PromptDisposition:
         command: dict[str, Any] = {"type": "prompt", "message": message}
         if images is not None:
             command["images"] = images
-        await self._send(command)
+        if streaming_behavior is not None:
+            command["streamingBehavior"] = streaming_behavior
+        return self._get_data(await self._send(command))["disposition"]
 
-    async def steer(self, message: str, images: list[ImageContent] | None = None) -> None:
+    async def steer(
+        self, message: str, images: list[ImageContent] | None = None
+    ) -> QueuedInputDisposition:
         command: dict[str, Any] = {"type": "steer", "message": message}
         if images is not None:
             command["images"] = images
-        await self._send(command)
+        return self._get_data(await self._send(command))["disposition"]
 
-    async def follow_up(self, message: str, images: list[ImageContent] | None = None) -> None:
+    async def follow_up(
+        self, message: str, images: list[ImageContent] | None = None
+    ) -> QueuedInputDisposition:
         command: dict[str, Any] = {"type": "follow_up", "message": message}
         if images is not None:
             command["images"] = images
-        await self._send(command)
+        return self._get_data(await self._send(command))["disposition"]
 
     async def abort(self) -> None:
         await self._send({"type": "abort"})
@@ -218,6 +233,10 @@ class RpcClient:
 
     async def abort_bash(self) -> None:
         await self._send({"type": "abort_bash"})
+
+    async def clear_queue(self) -> dict[str, list[str]]:
+        response = await self._send({"type": "clear_queue"})
+        return self._get_data(response)
 
     async def get_session_stats(self) -> SessionStats:
         response = await self._send({"type": "get_session_stats"})

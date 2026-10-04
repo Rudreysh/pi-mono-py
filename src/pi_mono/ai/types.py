@@ -77,6 +77,8 @@ ThinkingLevel = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 ModelThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 ThinkingLevelMap = dict[ModelThinkingLevel, Union[str, None]]
+SamplingParams = dict[str, Any]
+SamplingParamsByThinkingLevel = dict[ModelThinkingLevel, SamplingParams]
 
 
 class ThinkingBudgets(TypedDict, total=False):
@@ -105,6 +107,24 @@ class ModelCost(ModelCostRates, total=False):
     tiers: list[ModelCostTier]
 
 
+class ModelImageResizeOptions(TypedDict, total=False):
+    maxWidth: int
+    maxHeight: int
+    maxBytes: int
+    jpegQuality: int
+
+
+class ModelImageInputLimits(TypedDict, total=False):
+    resize: ModelImageResizeOptions
+    maxPerMessage: int
+    maxPerRequest: int
+
+
+class ModelInputLimits(TypedDict, total=False):
+    maxRequestBytes: int
+    images: ModelImageInputLimits
+
+
 Transport = Literal["sse", "websocket", "websocket-cached", "auto"]
 
 SessionAffinityFormat = Literal["openai", "openai-nosession", "openrouter"]
@@ -115,6 +135,8 @@ class OpenAIResponsesCompat(TypedDict, total=False):
 
     sessionAffinityFormat: SessionAffinityFormat
     supportsLongCacheRetention: bool
+    supportsExplicitPromptCacheMode: bool
+    supportsMaxOutputTokens: bool
     # Deprecated: use sessionAffinityFormat instead.
     sendSessionIdHeader: bool
 
@@ -127,10 +149,13 @@ class Model(TypedDict, total=False):
     baseUrl: str
     reasoning: bool
     input: list[Literal["text", "image"]]
+    inputLimits: ModelInputLimits
     cost: ModelCost
     contextWindow: int
     maxTokens: int
     thinkingLevelMap: ThinkingLevelMap
+    samplingParams: SamplingParams
+    samplingParamsByThinkingLevel: SamplingParamsByThinkingLevel
     compat: dict[str, Any]
     headers: dict[str, str]
 
@@ -217,6 +242,8 @@ class AssistantMessage(TypedDict, total=False):
     stopReason: StopReason
     errorMessage: str
     timestamp: int  # Unix timestamp in milliseconds
+    providerThinkingLevel: str
+    thinkingLevel: str
 
 
 class AssistantMessageEventStart(TypedDict):
@@ -277,6 +304,7 @@ class Context(TypedDict, total=False):
 
 class StreamOptions(TypedDict, total=False):
     temperature: float
+    samplingParams: SamplingParams
     maxTokens: int
     signal: Any
     apiKey: str
@@ -285,6 +313,7 @@ class StreamOptions(TypedDict, total=False):
     sessionId: str
     onPayload: Callable[[Any, Model], Any]
     onResponse: Callable[[Any, Model], Any]
+    onProviderStreamEvent: Callable[[Any, Model], Any]
     headers: dict[str, str]
     timeoutMs: int
     websocketConnectTimeoutMs: int

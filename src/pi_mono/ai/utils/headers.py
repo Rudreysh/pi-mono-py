@@ -1,12 +1,5 @@
 """HTTP headers utilities."""
 
-from typing import Iterable
+from pi_mono.utils.headers import headers_to_record
 
-
-def headers_to_record(
-    headers: Iterable[tuple[str, str]] | dict[str, str],
-) -> dict[str, str]:
-    """Convert headers to a plain dict."""
-    if isinstance(headers, dict):
-        return dict(headers)
-    return {key: value for key, value in headers}
+__all__ = ["headers_to_record"]

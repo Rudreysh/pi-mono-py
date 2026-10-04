@@ -55,9 +55,11 @@ class Args:
     no_prompt_templates: bool = False
     themes: list[str] | None = None
     no_themes: bool = False
+    use_theme: str | None = None
     no_context_files: bool = False
     list_models: str | bool | None = None
     offline: bool = False
+    tui_mode: Literal["regular", "fullscreen"] | None = None
     verbose: bool = False
     project_trust_override: bool | None = None
     messages: list[str] = field(default_factory=list)
@@ -77,7 +79,14 @@ def parse_args(args: list[str]) -> Args:
     while i < len(args):
         arg = args[i]
 
-        if arg in ("--help", "-h"):
+        if arg == "--":
+            for positional_arg in args[i + 1 :]:
+                if positional_arg.startswith("@"):
+                    result.file_args.append(positional_arg[1:])
+                else:
+                    result.messages.append(positional_arg)
+            break
+        elif arg in ("--help", "-h"):
             result.help = True
         elif arg in ("--version", "-v"):
             result.version = True
@@ -128,7 +137,7 @@ def parse_args(args: list[str]) -> Args:
             result.session_dir = args[i + 1]
             i += 1
         elif arg == "--models" and i + 1 < len(args):
-            result.models = [s.strip() for s in args[i + 1].split(",")]
+            result.models = [s.strip() for s in args[i + 1].split(",") if s.strip()]
             i += 1
         elif arg in ("--no-tools", "-nt"):
             result.no_tools = True
@@ -189,6 +198,14 @@ def parse_args(args: list[str]) -> Args:
                 result.themes = []
             result.themes.append(args[i + 1])
             i += 1
+        elif arg == "--use-theme":
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                result.diagnostics.append(
+                    {"type": "error", "message": "--use-theme requires a theme name"}
+                )
+            else:
+                result.use_theme = args[i + 1]
+                i += 1
         elif arg in ("--no-skills", "-ns"):
             result.no_skills = True
         elif arg in ("--no-prompt-templates", "-np"):
@@ -211,6 +228,23 @@ def parse_args(args: list[str]) -> Args:
             result.verbose = True
         elif arg == "--offline":
             result.offline = True
+        elif arg == "--tui-mode":
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                result.diagnostics.append(
+                    {"type": "error", "message": "--tui-mode requires regular or fullscreen"}
+                )
+            else:
+                mode = args[i + 1]
+                i += 1
+                if mode in ("regular", "fullscreen"):
+                    result.tui_mode = mode  # type: ignore[assignment]
+                else:
+                    result.diagnostics.append(
+                        {
+                            "type": "error",
+                            "message": f'Invalid TUI mode "{mode}". Valid values: regular, fullscreen',
+                        }
+                    )
         elif arg in ("--approve", "-a"):
             result.project_trust_override = True
         elif arg in ("--no-approve", "-na"):
@@ -258,10 +292,15 @@ def print_help(extension_flags: list[dict[str, str]] | None = None) -> None:
         f"""{APP_NAME} - AI coding assistant with read, bash, edit, write tools
 
 Usage:
-  {APP_NAME} [options] [@files...] [messages...]
+  {APP_NAME} [options] [--] [@files...] [messages...]
+
+Commands:
+  {APP_NAME} auth print-api-key --provider <provider>
+  {APP_NAME} auth print-bearer-token --provider <provider>
+  {APP_NAME} auth check --provider <provider> [--json]
 
 Options:
-  --provider <name>              Provider name
+  --provider <name>              Provider to search for --model (requires --model)
   --model <pattern>              Model pattern or ID
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt
@@ -285,6 +324,8 @@ Options:
   --list-models [search]         List available models
   --verbose                      Force verbose startup
   --offline                      Disable startup network operations
+  --use-theme <name[/name]>      Set the initial interactive theme for this run
+  --tui-mode <mode>              TUI mode: fullscreen (default) or regular
   --help, -h                     Show this help
   --version, -v                  Show version number
 
@@ -298,6 +339,7 @@ Environment Variables:
 Built-in Tool Names:
   read   - Read file contents
   bash   - Execute bash commands
+  powershell - Execute PowerShell commands on Windows
   edit   - Edit files with find/replace
   write  - Write files (creates/overwrites)
   grep   - Search file contents (read-only, off by default)

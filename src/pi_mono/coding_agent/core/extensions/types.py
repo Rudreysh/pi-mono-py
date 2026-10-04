@@ -97,6 +97,7 @@ class InputEventResult(TypedDict, total=False):
 class ToolCallEventResult(TypedDict, total=False):
     block: bool
     reason: str
+    terminate: bool
 
 
 class ToolResultEventResult(TypedDict, total=False):
@@ -115,6 +116,29 @@ class UserBashEvent(TypedDict):
 class UserBashEventResult(TypedDict, total=False):
     operations: Any
     result: BashResult
+
+
+class MarkdownTransformContext(TypedDict):
+    messageType: Literal["user", "assistant", "assistant-thinking"]
+    isStreaming: bool
+    availableWidth: int
+
+
+MarkdownTransformer = Callable[[str, MarkdownTransformContext], str]
+
+
+class UIPromptStartEvent(TypedDict, total=False):
+    type: Literal["ui_prompt_start"]
+    reason: Literal["ui_prompt"]
+    kind: Literal["select", "confirm", "input", "editor", "custom"]
+    title: str
+
+
+class UIPromptEndEvent(TypedDict, total=False):
+    type: Literal["ui_prompt_end"]
+    reason: Literal["ui_prompt"]
+    kind: Literal["select", "confirm", "input", "editor", "custom"]
+    title: str
 
 
 class ProviderConfig(TypedDict, total=False):
@@ -186,6 +210,7 @@ class Extension:
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
     shortcuts: dict[str, ExtensionShortcut] = field(default_factory=dict)
+    markdown_transformer: Callable[[str, dict[str, Any]], str] | None = None
 
 
 @dataclass
@@ -262,6 +287,7 @@ class ExtensionAPI(Protocol):
     def register_shortcut(self, shortcut: str, options: dict[str, Any]) -> None: ...
     def register_flag(self, name: str, options: dict[str, Any]) -> None: ...
     def register_message_renderer(self, custom_type: str, renderer: Any) -> None: ...
+    def register_markdown_transformer(self, transformer: MarkdownTransformer) -> None: ...
     def register_entry_renderer(self, custom_type: str, renderer: Any) -> None: ...
     def get_flag(self, name: str) -> bool | str | None: ...
     def send_message(

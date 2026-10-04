@@ -25,7 +25,9 @@ def render_tool_call(tool_name: str, args: Any, cwd: str, *, expanded: bool) -> 
         limit = args.get("limit")
         suffix = ""
         if offset is not None or limit is not None:
-            suffix = f" ({offset or 1}-{limit or 'end'})"
+            start_line = offset if isinstance(offset, int) else 1
+            end_line = start_line + limit - 1 if isinstance(limit, int) else "end"
+            suffix = f" ({start_line}-{end_line})"
         return f"{theme.fg('toolTitle', theme.bold('read'))} {path}{suffix}"
     if tool_name == "bash":
         command = args.get("command")

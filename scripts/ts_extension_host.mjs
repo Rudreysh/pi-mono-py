@@ -40,44 +40,40 @@ function findRepoRoot(startDir) {
 	throw new Error("Could not locate pi-mono repository root for TypeScript extension loading");
 }
 
+function workspaceSourceAliases(repoRoot) {
+	const aliases = {};
+	const packagesDir = path.join(repoRoot, "packages");
+	if (!fs.existsSync(packagesDir)) {
+		return aliases;
+	}
+	for (const name of fs.readdirSync(packagesDir)) {
+		const packageDir = path.join(packagesDir, name);
+		const pkgPath = path.join(packageDir, "package.json");
+		const srcDir = path.join(packageDir, "src");
+		if (!fs.existsSync(pkgPath) || !fs.existsSync(srcDir)) {
+			continue;
+		}
+		let pkg;
+		try {
+			pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+		} catch {
+			continue;
+		}
+		if (pkg?.name) {
+			aliases[pkg.name] = srcDir;
+		}
+	}
+	return aliases;
+}
+
 function buildAliases(repoRoot) {
 	const require = createRequire(import.meta.url);
-	const loaderDir = path.join(repoRoot, "packages/coding-agent/src/core/extensions");
-	const packageIndex = path.join(repoRoot, "packages/coding-agent/src/index.ts");
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
 	const typeboxValueEntry = require.resolve("typebox/value");
-	const resolveWorkspaceOrImport = (workspaceRelativePath, specifier) => {
-		const workspacePath = path.join(repoRoot, workspaceRelativePath);
-		if (fs.existsSync(workspacePath)) {
-			return workspacePath;
-		}
-		return fileURLToPath(import.meta.resolve(specifier));
-	};
 
-	return {
-		"@earendil-works/pi-coding-agent": packageIndex,
-		"@earendil-works/pi-agent-core": resolveWorkspaceOrImport(
-			"packages/agent/src/index.ts",
-			"@earendil-works/pi-agent-core",
-		),
-		"@earendil-works/pi-tui": resolveWorkspaceOrImport("packages/tui/src/index.ts", "@earendil-works/pi-tui"),
-		"@earendil-works/pi-ai": resolveWorkspaceOrImport("packages/ai/src/index.ts", "@earendil-works/pi-ai"),
-		"@earendil-works/pi-ai/oauth": resolveWorkspaceOrImport(
-			"packages/ai/src/oauth.ts",
-			"@earendil-works/pi-ai/oauth",
-		),
-		"@mariozechner/pi-coding-agent": packageIndex,
-		"@mariozechner/pi-agent-core": resolveWorkspaceOrImport(
-			"packages/agent/src/index.ts",
-			"@mariozechner/pi-agent-core",
-		),
-		"@mariozechner/pi-tui": resolveWorkspaceOrImport("packages/tui/src/index.ts", "@mariozechner/pi-tui"),
-		"@mariozechner/pi-ai": resolveWorkspaceOrImport("packages/ai/src/index.ts", "@mariozechner/pi-ai"),
-		"@mariozechner/pi-ai/oauth": resolveWorkspaceOrImport(
-			"packages/ai/src/oauth.ts",
-			"@mariozechner/pi-ai/oauth",
-		),
+	const aliases = {
+		...workspaceSourceAliases(repoRoot),
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -85,6 +81,13 @@ function buildAliases(repoRoot) {
 		"@sinclair/typebox/compile": typeboxCompileEntry,
 		"@sinclair/typebox/value": typeboxValueEntry,
 	};
+
+	for (const [spec, target] of Object.entries({ ...aliases })) {
+		if (spec.startsWith("@earendil-works/")) {
+			aliases[spec.replace("@earendil-works/", "@mariozechner/")] = target;
+		}
+	}
+	return aliases;
 }
 
 const repoRoot = findRepoRoot(path.join(__dirname, "..", ".."));

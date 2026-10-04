@@ -19,25 +19,28 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _tsx_executable(root: Path) -> str:
-    local_tsx = root / "node_modules" / ".bin" / "tsx"
-    if local_tsx.is_file():
-        return str(local_tsx)
-    found = shutil.which("tsx")
+def _node_executable(root: Path) -> str:
+    found = shutil.which("node")
     if found:
         return found
-    raise FileNotFoundError("tsx is required to export TypeScript model catalogs")
+    raise FileNotFoundError("node is required to export TypeScript model catalogs")
 
 
 def export_ts_catalog(ts_path: Path, export_name: str) -> bytes:
     root = _repo_root()
-    tsx = _tsx_executable(root)
+    node = _node_executable(root)
     script = (
         f'import {{ {export_name} }} from "{ts_path.as_posix()}"; '
         f"process.stdout.write(JSON.stringify({export_name}));"
     )
     result = subprocess.run(
-        [tsx, "-e", script],
+        [
+            node,
+            "--experimental-strip-types",
+            "--disable-warning=ExperimentalWarning",
+            "-e",
+            script,
+        ],
         cwd=root,
         capture_output=True,
         check=False,
@@ -62,6 +65,10 @@ def resolve_catalog_source(
     ts_path = package_src / f"{stem}.ts"
     if ts_path.is_file():
         return ts_path, export_name
+    if stem == "image-models.generated":
+        fallback = package_src / "models.generated.ts"
+        if fallback.is_file():
+            return fallback, export_name
     raise FileNotFoundError(f"Missing source catalog for {stem}")
 
 

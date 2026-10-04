@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pi_mono.coding_agent.modes.interactive.components.markdown_transform import (
+    transform_markdown,
+)
 from pi_mono.coding_agent.modes.interactive.theme.theme import get_markdown_theme, theme
 from pi_mono.tui.components.box import Box
 from pi_mono.tui.components.markdown import DefaultTextStyle, Markdown
@@ -13,10 +16,16 @@ OSC133_ZONE_FINAL = "\x1b]133;C\x07"
 
 
 class UserMessageComponent(Container):
-    def __init__(self, text: str, output_pad: int = 1) -> None:
+    def __init__(
+        self,
+        text: str,
+        output_pad: int = 1,
+        markdown_transformers: list | None = None,
+    ) -> None:
         super().__init__()
         self._output_pad = output_pad
         self._text = text
+        self._markdown_transformers = markdown_transformers or []
         self._rebuild()
 
     def set_output_pad(self, padding: int) -> None:
@@ -28,7 +37,11 @@ class UserMessageComponent(Container):
         content_box = Box(self._output_pad, 1, theme.bg_fn("userMessageBg"))
         content_box.add_child(
             Markdown(
-                self._text,
+                transform_markdown(
+                    self._text,
+                    message_type="user",
+                    transformers=self._markdown_transformers,
+                ),
                 0,
                 0,
                 get_markdown_theme(),

@@ -170,6 +170,52 @@ async def test_stream_mistral_tool_calls():
 
 
 @pytest.mark.anyio
+async def test_stream_mistral_ignores_empty_content_deltas():
+    model: Model = {
+        "id": "zai-glm-5-3",
+        "provider": "mistral",
+        "api": "mistral-conversations",
+        "input": ["text"],
+        "cost": {"input": 2.0, "output": 6.0, "cacheRead": 0.0, "cacheWrite": 0.0},
+    }
+    context: Context = {"messages": [{"role": "user", "content": "Hello"}]}
+    thinking = lambda text: {"type": "thinking", "thinking": [{"type": "text", "text": text}]}
+    events = [
+        MockEvent(MockChunk("msg-1", [MockChoice(MockDelta(""))])),
+        MockEvent(MockChunk("msg-1", [MockChoice(MockDelta([thinking("first ")]))])),
+        MockEvent(MockChunk("msg-1", [MockChoice(MockDelta(""))])),
+        MockEvent(MockChunk("msg-1", [MockChoice(MockDelta([{"type": "text", "text": ""}]))])),
+        MockEvent(
+            MockChunk(
+                "msg-1",
+                [MockChoice(MockDelta([thinking("part"), {"type": "text", "text": "Answer"}]))],
+            )
+        ),
+        MockEvent(MockChunk("msg-1", [MockChoice(MockDelta(None), "stop")])),
+    ]
+
+    async def mock_stream_async(*args, **kwargs):
+        class MockAsyncIterable:
+            async def __aiter__(self):
+                for event in events:
+                    yield event
+
+        return MockAsyncIterable()
+
+    mock_client = MagicMock()
+    mock_client.chat.stream_async = mock_stream_async
+
+    with patch("pi_mono.ai.providers.mistral.Mistral", return_value=mock_client):
+        stream = stream_mistral(model, context, {"apiKey": "mock-key"})
+        results = [event async for event in stream]
+
+    assert results[-1]["message"]["content"] == [
+        {"type": "thinking", "thinking": "first part"},
+        {"type": "text", "text": "Answer"},
+    ]
+
+
+@pytest.mark.anyio
 async def test_stream_simple_mistral_reasoning():
     model: Model = {
         "id": "mistral-small-latest",

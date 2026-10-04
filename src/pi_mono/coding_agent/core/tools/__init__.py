@@ -10,12 +10,22 @@ from pi_mono.coding_agent.core.tools.edit import EditToolOptions, create_edit_to
 from pi_mono.coding_agent.core.tools.find import FindToolOptions, create_find_tool
 from pi_mono.coding_agent.core.tools.grep import GrepToolOptions, create_grep_tool
 from pi_mono.coding_agent.core.tools.ls import LsToolOptions, create_ls_tool
+from pi_mono.coding_agent.core.tools.powershell import PowerShellToolOptions, create_powershell_tool
 from pi_mono.coding_agent.core.tools.read import ReadToolOptions, create_read_tool
 from pi_mono.coding_agent.core.tools.write import WriteToolOptions, create_write_tool
 
-ToolName = Literal["read", "bash", "edit", "write", "grep", "find", "ls"]
+ToolName = Literal["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]
 
-ALL_TOOL_NAMES: set[ToolName] = {"read", "bash", "edit", "write", "grep", "find", "ls"}
+ALL_TOOL_NAMES: set[ToolName] = {
+    "read",
+    "bash",
+    "powershell",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+}
 
 
 class ToolsOptions:
@@ -24,6 +34,7 @@ class ToolsOptions:
         *,
         read: ReadToolOptions | None = None,
         bash: BashToolOptions | None = None,
+        powershell: PowerShellToolOptions | None = None,
         write: WriteToolOptions | None = None,
         edit: EditToolOptions | None = None,
         grep: GrepToolOptions | None = None,
@@ -32,6 +43,7 @@ class ToolsOptions:
     ) -> None:
         self.read = read
         self.bash = bash
+        self.powershell = powershell
         self.write = write
         self.edit = edit
         self.grep = grep
@@ -44,6 +56,7 @@ def create_tool(tool_name: ToolName, cwd: str, options: ToolsOptions | None = No
     factories = {
         "read": lambda: create_read_tool(cwd, opts.read),
         "bash": lambda: create_bash_tool(cwd, opts.bash),
+        "powershell": lambda: create_powershell_tool(cwd, opts.powershell),
         "edit": lambda: create_edit_tool(cwd, opts.edit),
         "write": lambda: create_write_tool(cwd, opts.write),
         "grep": lambda: create_grep_tool(cwd, opts.grep),
@@ -82,6 +95,7 @@ __all__ = [
     "create_read_tool",
     "create_write_tool",
     "create_bash_tool",
+    "create_powershell_tool",
     "create_edit_tool",
     "create_grep_tool",
     "create_find_tool",

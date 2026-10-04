@@ -46,6 +46,39 @@ def _parse_proxy_target_url(target_url: str) -> tuple[str, str, int] | None:
         return None
 
 
+def _strip_brackets(host: str) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+def _parse_no_proxy_entry(entry: str) -> tuple[str, int] | None:
+    trimmed = entry.strip().lower()
+    if not trimmed:
+        return None
+    if trimmed.startswith("["):
+        closing = trimmed.find("]")
+        if closing != -1:
+            host = trimmed[1:closing]
+            rest = trimmed[closing + 1 :]
+            if rest.startswith(":"):
+                try:
+                    return host, int(rest[1:])
+                except ValueError:
+                    return host, 0
+            return host, 0
+    if ":" in trimmed and trimmed.count(":") > 1:
+        return trimmed, 0
+    colon_index = trimmed.rfind(":")
+    if colon_index != -1 and colon_index == trimmed.find(":"):
+        host = trimmed[:colon_index]
+        try:
+            return host, int(trimmed[colon_index + 1 :])
+        except ValueError:
+            pass
+    return trimmed, 0
+
+
 def _should_proxy_hostname(hostname: str, port: int) -> bool:
     """Check if hostname should be proxied based on no_proxy env var."""
     no_proxy = _get_proxy_env("no_proxy").lower()
@@ -54,34 +87,24 @@ def _should_proxy_hostname(hostname: str, port: int) -> bool:
     if no_proxy == "*":
         return False
 
-    for proxy in re.split(r"[,\s]", no_proxy):
-        if not proxy:
+    normalized_target_host = _strip_brackets(hostname.lower())
+    for entry in re.split(r"[,\s]+", no_proxy):
+        parsed = _parse_no_proxy_entry(entry)
+        if parsed is None:
             continue
-
-        # Parse proxy spec (hostname:port or just hostname)
-        match = re.match(r"^(.+):(\d+)$", proxy)
-        if match:
-            proxy_hostname = match.group(1)
-            proxy_port = int(match.group(2))
-            if proxy_port != port:
-                continue
-        else:
-            proxy_hostname = proxy
-            proxy_port = 0
-
-        if not re.match(r"^[.*]", proxy_hostname):
-            if hostname != proxy_hostname:
-                continue
-        elif proxy_hostname.startswith("*"):
-            proxy_hostname = proxy_hostname[1:]
-            if not hostname.endswith(proxy_hostname):
-                continue
-        else:
+        proxy_hostname, proxy_port = parsed
+        if proxy_port and proxy_port != port:
             continue
-
-        return False  # Should NOT proxy
-
-    return True  # Should proxy
+        domain = _strip_brackets(proxy_hostname)
+        if domain.startswith("*."):
+            domain = domain[2:]
+        elif domain.startswith(".") or domain.startswith("*"):
+            domain = domain[1:]
+        if not domain:
+            continue
+        if normalized_target_host == domain or normalized_target_host.endswith(f".{domain}"):
+            return False
+    return True
 
 
 def _get_proxy_for_url(target_url: str) -> str:

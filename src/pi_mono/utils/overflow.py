@@ -34,12 +34,13 @@ class AssistantMessage(TypedDict, total=False):
 
 
 OVERFLOW_PATTERNS: list[Pattern[str]] = [
-    re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"prompt (?:is )?too long", re.IGNORECASE),
+    re.compile(r"prompt exceeds max length", re.IGNORECASE),
     re.compile(r"request_too_large", re.IGNORECASE),
     re.compile(r"input is too long for requested model", re.IGNORECASE),
     re.compile(r"exceeds the context window", re.IGNORECASE),
     re.compile(
-        r"exceeds (?:the )?(?:model'?s )?maximum context length of [\d,]+ tokens?",
+        r"exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))",
         re.IGNORECASE,
     ),
     re.compile(r"input token count.*exceeds the maximum", re.IGNORECASE),
@@ -60,8 +61,13 @@ OVERFLOW_PATTERNS: list[Pattern[str]] = [
     re.compile(r"context window exceeds limit", re.IGNORECASE),
     re.compile(r"exceeded model token limit", re.IGNORECASE),
     re.compile(r"too large for model with \d+ maximum context length", re.IGNORECASE),
+    re.compile(
+        r"prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?",
+        re.IGNORECASE,
+    ),
     re.compile(r"model_context_window_exceeded", re.IGNORECASE),
     re.compile(r"prompt too long; exceeded (?:max )?context length", re.IGNORECASE),
+    re.compile(r"range of input length should be", re.IGNORECASE),
     re.compile(r"context[_ ]length[_ ]exceeded", re.IGNORECASE),
     re.compile(r"too many tokens", re.IGNORECASE),
     re.compile(r"token limit exceeded", re.IGNORECASE),

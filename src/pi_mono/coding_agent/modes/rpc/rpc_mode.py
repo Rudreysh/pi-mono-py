@@ -12,10 +12,11 @@ import sys
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
-from pi_mono.coding_agent.core.agent_session import AgentSessionRuntime, PromptOptions
+from pi_mono.coding_agent.core.agent_session import AgentSessionRuntime, PromptDisposition, PromptOptions
 from pi_mono.coding_agent.core.extensions.types import ExtensionUIContext
 from pi_mono.coding_agent.core.source_info import SourceInfo
 from pi_mono.coding_agent.modes.rpc.jsonl import JsonlLineReader, serialize_json_line
+from pi_mono.coding_agent.modes.json_event import to_json_event
 from pi_mono.coding_agent.modes.rpc.rpc_types import (
     RpcCommand,
     RpcExtensionUIRequest,
@@ -419,7 +420,8 @@ class RpcMode:
         runtime_host.set_rebind_session(self._rebind_session)
 
     def output(self, obj: dict[str, Any]) -> None:
-        write_raw_stdout(serialize_json_line(obj))
+        payload = to_json_event(obj) if obj.get("type") == "message_update" else obj
+        write_raw_stdout(serialize_json_line(payload))
 
     def get_extension_ui_context(self) -> ExtensionUIContext:
         return self._extension_ui_context
@@ -481,13 +483,14 @@ class RpcMode:
                 return build_error_response(command_id, "prompt", "prompt.message must be a string")
             images = command.get("images")  # type: ignore[union-attr]
             streaming_behavior = command.get("streamingBehavior")  # type: ignore[union-attr]
-            preflight_succeeded = False
+            preflight_accepted = False
 
-            def preflight_result(success: bool) -> None:
-                nonlocal preflight_succeeded
-                if success:
-                    preflight_succeeded = True
-                    self.output(build_success_response(command_id, "prompt"))
+            def preflight_result(disposition: PromptDisposition) -> None:
+                nonlocal preflight_accepted
+                preflight_accepted = True
+                self.output(
+                    build_success_response(command_id, "prompt", {"disposition": disposition})
+                )
 
             prompt_options = PromptOptions(
                 images=images if isinstance(images, list) else None,
@@ -501,7 +504,7 @@ class RpcMode:
                 try:
                     await self._session.prompt(message, prompt_options)
                 except Exception as error:
-                    if not preflight_succeeded:
+                    if not preflight_accepted:
                         self.output(build_error_response(command_id, "prompt", str(error)))
                 await wait_for_raw_stdout_backpressure()
 
@@ -513,8 +516,8 @@ class RpcMode:
             if not isinstance(message, str):
                 return build_error_response(command_id, "steer", "steer.message must be a string")
             images = command.get("images")  # type: ignore[union-attr]
-            await self._session.steer(message, images)
-            return build_success_response(command_id, "steer")
+            disposition = await self._session.steer(message, images, source="rpc")
+            return build_success_response(command_id, "steer", {"disposition": disposition})
 
         if command_type == "follow_up":
             message = command.get("message")  # type: ignore[union-attr]
@@ -523,12 +526,15 @@ class RpcMode:
                     command_id, "follow_up", "follow_up.message must be a string"
                 )
             images = command.get("images")  # type: ignore[union-attr]
-            await self._session.follow_up(message, images)
-            return build_success_response(command_id, "follow_up")
+            disposition = await self._session.follow_up(message, images, source="rpc")
+            return build_success_response(command_id, "follow_up", {"disposition": disposition})
 
         if command_type == "abort":
             await self._session.abort()
             return build_success_response(command_id, "abort")
+
+        if command_type == "clear_queue":
+            return build_success_response(command_id, "clear_queue", self._session.clear_queue())
 
         if command_type == "new_session":
             parent_session = command.get("parentSession")  # type: ignore[union-attr]

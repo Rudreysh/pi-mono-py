@@ -16,6 +16,7 @@ from pi_mono.coding_agent.core.auth_guidance import (
     format_no_api_key_found_message,
     format_no_model_selected_message,
 )
+from pi_mono.coding_agent.modes.json_event import to_json_event
 from pi_mono.core.output_guard import flush_raw_stdout, write_raw_stdout
 
 PrintOutputMode = Literal["text", "json"]
@@ -86,7 +87,7 @@ async def run_print_mode(runtime_host: AgentSessionRuntime, options: PrintModeOp
 
         def on_event(event: dict[str, object]) -> None:
             if mode == "json":
-                write_raw_stdout(f"{json.dumps(event)}\n")
+                write_raw_stdout(f"{json.dumps(to_json_event(event))}\n")
 
         unsubscribe = session.subscribe(on_event)
 

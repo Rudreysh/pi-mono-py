@@ -109,6 +109,19 @@ def test_get_compat():
     assert compat["supportsDeveloperRole"] is True
 
 
+def test_unknown_openai_compatible_provider_defaults_to_non_strict_tools():
+    model = {
+        "id": "local-model",
+        "provider": "local-provider",
+        "baseUrl": "http://127.0.0.1:8080/v1",
+    }
+
+    assert get_compat(model)["supportsStrictMode"] is False
+
+    model["compat"] = {"supportsStrictMode": True}
+    assert get_compat(model)["supportsStrictMode"] is True
+
+
 def test_convert_messages():
     model = {
         "id": "gpt-4o",
@@ -183,6 +196,26 @@ def test_build_params():
     assert params["stream"] is True
     assert params["max_completion_tokens"] == 100
     assert len(params["messages"]) == 2
+
+
+def test_build_params_merges_model_and_request_sampling_params():
+    model = {
+        "id": "gpt-4o",
+        "provider": "openai",
+        "baseUrl": "https://api.openai.com/v1",
+        "samplingParams": {"temperature": 0.2, "top_p": 0.8},
+    }
+    context = {"messages": [{"role": "user", "content": "hello"}]}
+
+    params = build_params(
+        model,
+        context,
+        {"samplingParams": {"temperature": 0.7}},
+        get_compat(model),
+    )
+
+    assert params["temperature"] == 0.7
+    assert params["top_p"] == 0.8
 
 
 def test_prepare_openai_chat_completion_params_moves_openrouter_reasoning():

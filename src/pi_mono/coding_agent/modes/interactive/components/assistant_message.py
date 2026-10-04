@@ -6,6 +6,9 @@ from typing import Any
 
 from pi_mono.agent.types import AgentMessage
 from pi_mono.coding_agent.core.auth_guidance import format_api_error_message
+from pi_mono.coding_agent.modes.interactive.components.markdown_transform import (
+    transform_markdown,
+)
 from pi_mono.coding_agent.modes.interactive.theme.theme import get_markdown_theme, theme
 from pi_mono.tui.components.markdown import DefaultTextStyle, Markdown
 from pi_mono.tui.components.spacer import Spacer
@@ -27,6 +30,7 @@ class AssistantMessageComponent(Container):
         hide_thinking_block: bool = False,
         hidden_thinking_label: str = "Thinking...",
         output_pad: int = 1,
+        markdown_transformers: list[Any] | None = None,
     ) -> None:
         super().__init__()
         self._content_container = Container()
@@ -35,6 +39,7 @@ class AssistantMessageComponent(Container):
         self._markdown_theme = get_markdown_theme()
         self._hidden_thinking_label = hidden_thinking_label
         self._output_pad = output_pad
+        self._markdown_transformers = markdown_transformers or []
         self._last_message: AgentMessage | dict[str, Any] | None = None
         self._has_tool_calls = False
         if message is not None:
@@ -74,6 +79,11 @@ class AssistantMessageComponent(Container):
             if block_type == "text":
                 text = str(block.get("text", "")).strip()
                 if text:
+                    text = transform_markdown(
+                        text,
+                        message_type="assistant",
+                        transformers=self._markdown_transformers,
+                    )
                     self._content_container.add_child(
                         Markdown(text, self._output_pad, 0, self._markdown_theme)
                     )

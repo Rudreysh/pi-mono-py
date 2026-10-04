@@ -28,6 +28,10 @@ def test_build_settings_items_includes_phase2_settings() -> None:
     assert "collapse-changelog" in item_ids
     assert "quiet-startup" in item_ids
     assert "tree-filter-mode" in item_ids
+    assert "tui-mode" in item_ids
+    assert "fullscreen-exit-output" in item_ids
+    assert "fullscreen-scrollbar" in item_ids
+    assert "fullscreen-copy-on-select" in item_ids
 
 
 def test_handle_settings_change_phase2_callbacks() -> None:
@@ -67,11 +71,17 @@ def test_handle_settings_change_phase2_callbacks() -> None:
         def on_collapse_changelog_change(self, collapsed: bool) -> None:
             calls["collapse_changelog"] = collapsed
 
-        def on_quiet_startup_change(self, enabled: bool) -> None:
+        def on_quiet_startup_change(self, enabled: bool | str) -> None:
             calls["quiet_startup"] = enabled
 
         def on_tree_filter_mode_change(self, mode: str) -> None:
             calls["tree_filter_mode"] = mode
+
+        def on_tui_mode_change(self, mode: str) -> None:
+            calls["tui_mode"] = mode
+
+        def on_fullscreen_copy_on_select_change(self, enabled: bool) -> None:
+            calls["fullscreen_copy"] = enabled
 
         def on_cancel(self) -> None:
             calls["cancel"] = True
@@ -81,7 +91,11 @@ def test_handle_settings_change_phase2_callbacks() -> None:
     handle_settings_change("cache-miss-notices", "true", callbacks)
     handle_settings_change("output-padding", "0", callbacks)
     handle_settings_change("tree-filter-mode", "user-only", callbacks)
+    handle_settings_change("tui-mode", "fullscreen", callbacks)
+    handle_settings_change("fullscreen-copy-on-select", "false", callbacks)
     assert calls["hide_thinking"] is True
     assert calls["cache_miss"] is True
     assert calls["output_pad"] == 0
     assert calls["tree_filter_mode"] == "user-only"
+    assert calls["tui_mode"] == "fullscreen"
+    assert calls["fullscreen_copy"] is False

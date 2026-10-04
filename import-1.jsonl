@@ -1,0 +1,2 @@
+{"type": "session", "version": 3, "id": "phase1-session", "timestamp": "2026-10-04T09:38:17.370941Z", "cwd": "/private/var/folders/yj/znm521ks0zzg1cq4r9v_j45c0000gn/T/pytest-of-rukesh/pytest-0/test_import_from_jsonl_loads_s0"}
+{"type": "message", "id": "entry-1", "parentId": null, "timestamp": "2026-10-04T09:38:17.370941Z", "message": {"role": "user", "content": [{"type": "text", "text": "Phase 1 import test"}]}}

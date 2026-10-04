@@ -9,7 +9,7 @@ import base64
 import os
 import subprocess
 import struct
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # =============================================================================
 # Type Definitions
@@ -99,6 +99,7 @@ class ImageCellSize:
 # =============================================================================
 
 _cached_capabilities: Optional[TerminalCapabilities] = None
+_capability_overrides: dict[str, Any] = {}
 _cell_dimensions = CellDimensions(9, 18)  # Default cell size
 
 
@@ -123,12 +124,46 @@ def _probe_tmux_hyperlinks() -> bool:
         return False
 
 
+def _parse_boolean_capability_override(value: str | None) -> bool | None:
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    return None
+
+
+_UNSET = object()
+
+
 def detect_capabilities(
     tmux_forwards_hyperlink: Optional[Callable[[], bool]] = None
 ) -> TerminalCapabilities:
-    """Detect terminal capabilities based on environment variables."""
+    """Detect terminal capabilities based on environment variables and PI_* overrides."""
     if tmux_forwards_hyperlink is None:
         tmux_forwards_hyperlink = _probe_tmux_hyperlinks
+
+    hyperlinks_override = _parse_boolean_capability_override(os.environ.get("PI_HYPERLINKS"))
+    detected = _detect_capabilities_from_environment(
+        tmux_forwards_hyperlink if hyperlinks_override is None else (lambda: hyperlinks_override)
+    )
+    image_protocol = (os.environ.get("PI_IMAGE_PROTOCOL") or "").lower()
+    images: ImageProtocol | object = _UNSET
+    if image_protocol in ("kitty", "iterm2"):
+        images = image_protocol
+    elif image_protocol in ("none", "0"):
+        images = None
+    true_color_override = _parse_boolean_capability_override(os.environ.get("PI_TRUE_COLOR"))
+    return TerminalCapabilities(
+        images=detected.images if images is _UNSET else images,  # type: ignore[arg-type]
+        true_color=detected.true_color if true_color_override is None else true_color_override,
+        hyperlinks=detected.hyperlinks if hyperlinks_override is None else hyperlinks_override,
+    )
+
+
+def _detect_capabilities_from_environment(
+    tmux_forwards_hyperlink: Callable[[], bool],
+) -> TerminalCapabilities:
+    """Detect terminal capabilities based on environment variables."""
 
     term_program = os.environ.get("TERM_PROGRAM", "").lower()
     terminal_emulator = os.environ.get("TERMINAL_EMULATOR", "").lower()
@@ -196,13 +231,54 @@ def get_capabilities() -> TerminalCapabilities:
     """Get cached terminal capabilities."""
     global _cached_capabilities
     if _cached_capabilities is None:
-        _cached_capabilities = detect_capabilities()
+        hyperlinks = _capability_overrides.get("hyperlinks")
+        detected = detect_capabilities(
+            None if hyperlinks is None else (lambda: bool(hyperlinks))
+        )
+        _cached_capabilities = TerminalCapabilities(
+            images=(
+                _capability_overrides["images"]
+                if "images" in _capability_overrides
+                else detected.images
+            ),
+            true_color=(
+                _capability_overrides["true_color"]
+                if "true_color" in _capability_overrides
+                else detected.true_color
+            ),
+            hyperlinks=(
+                _capability_overrides["hyperlinks"]
+                if "hyperlinks" in _capability_overrides
+                else detected.hyperlinks
+            ),
+        )
     return _cached_capabilities
 
 
 def reset_capabilities_cache() -> None:
     """Reset cached capabilities (useful for testing)."""
     global _cached_capabilities
+    _cached_capabilities = None
+
+
+def set_capability_overrides(
+    *,
+    images: ImageProtocol | object = _UNSET,
+    true_color: bool | object = _UNSET,
+    hyperlinks: bool | object = _UNSET,
+) -> None:
+    """Override selected auto-detected capabilities."""
+    global _capability_overrides, _cached_capabilities
+    overrides: dict[str, Any] = {}
+    if images is not _UNSET:
+        overrides["images"] = images
+    if true_color is not _UNSET:
+        overrides["true_color"] = true_color
+    if hyperlinks is not _UNSET:
+        overrides["hyperlinks"] = hyperlinks
+    if overrides == _capability_overrides:
+        return
+    _capability_overrides = overrides
     _cached_capabilities = None
 
 

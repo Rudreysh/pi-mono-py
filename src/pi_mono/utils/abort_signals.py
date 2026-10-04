@@ -1,6 +1,15 @@
 from typing import Any, Callable, Sequence, TypedDict
 
 
+def is_aborted(signal: Any | None) -> bool:
+    """Return True for AbortSignal objects or dict-shaped abort flags."""
+    if signal is None:
+        return False
+    if isinstance(signal, dict):
+        return bool(signal.get("aborted"))
+    return bool(getattr(signal, "aborted", False))
+
+
 class AbortSignal:
     """A signal object that allows you to communicate with a DOM request
 

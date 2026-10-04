@@ -100,6 +100,9 @@ from pi_mono.coding_agent.modes.interactive.components.footer import (
     format_tokens,
 )
 from pi_mono.coding_agent.modes.interactive.components.model_selector import ModelSelectorComponent
+from pi_mono.coding_agent.modes.interactive.components.thinking_selector import (
+    ThinkingSelectorComponent,
+)
 from pi_mono.coding_agent.modes.interactive.components.scoped_models_selector import (
     ScopedModelsSelectorComponent,
 )
@@ -141,8 +144,12 @@ from pi_mono.tui.components.spacer import Spacer
 from pi_mono.tui.components.text import Text
 from pi_mono.tui.keybindings import get_keybindings, set_keybindings
 from pi_mono.tui.keys import matches_key
-from pi_mono.tui.terminal import ProcessTerminal
-from pi_mono.tui.tui import Container, OverlayOptions, TUI
+from pi_mono.tui.tui import Container, TUI
+from pi_mono.tui.tui_alt_screen import TuiAltScreen
+from pi_mono.coding_agent.modes.interactive.tui_renderer import (
+    InteractiveTuiOptions,
+    create_interactive_tui,
+)
 from pi_mono.utils.changelog import format_changelog_markdown, get_new_entries, parse_changelog
 from pi_mono.utils.version_check import LatestPiRelease, check_for_new_pi_version
 
@@ -181,6 +188,7 @@ class InteractiveModeOptions:
     initial_images: list[ImageContent] | None = None
     theme_name: str = "dark"
     verbose: bool = False
+    tui_mode: Literal["regular", "fullscreen"] | None = None
 
 
 def _message_text(message: AgentMessage | dict[str, Any]) -> str:
@@ -260,6 +268,7 @@ class InteractiveMode:
         self._retry_loader: Loader | None = None
         self._extension_ui_context: InteractiveExtensionUIContext | None = None
         self._theme_controller: InteractiveThemeController | None = None
+        self._tui_mode: Literal["regular", "fullscreen"] = "regular"
 
         self._runtime_host.set_rebind_session(self._rebind_session)
 
@@ -277,7 +286,19 @@ class InteractiveMode:
         if self._ui is not None:
             return
         init_theme(self._theme_name)
-        self._ui = TUI(ProcessTerminal(), show_hardware_cursor=True)
+        self._tui_mode = self._options.tui_mode or self._session.settings_manager.get_tui_mode()
+        self._ui = create_interactive_tui(
+            InteractiveTuiOptions(
+                tui_mode=self._tui_mode,
+                show_hardware_cursor=self._session.settings_manager.get_show_hardware_cursor()
+                if hasattr(self._session.settings_manager, "get_show_hardware_cursor")
+                else True,
+                fullscreen_copy_on_select=self._session.settings_manager.get_fullscreen_copy_on_select(),
+                scroll_to_end_indicator=lambda: theme.bg(
+                    "selectedBg", theme.fg("text", " ↓ Jump to latest message ")
+                ),
+            )
+        )
         self._chat_container = Container()
         self._status_container = Container()
         self._footer_container = Container()
@@ -298,6 +319,52 @@ class InteractiveMode:
             self._show_error,
             self._on_theme_changed,
         )
+
+    def _apply_tui_mode(self, mode: Literal["regular", "fullscreen"]) -> None:
+        if self._ui is None or mode == self._tui_mode:
+            return
+        if self._ui.has_overlay():
+            return
+        old = self._ui
+        children = list(old.children)
+        focused = old.focused_component
+        terminal = old.terminal
+        old.stop(preserve_screen=True)
+        old.set_focus(None)
+        for child in children:
+            old.remove_child(child)
+        self._tui_mode = mode
+        self._ui = create_interactive_tui(
+            InteractiveTuiOptions(
+                tui_mode=mode,
+                terminal=terminal,
+                show_hardware_cursor=self._session.settings_manager.get_show_hardware_cursor(),
+                fullscreen_copy_on_select=self._session.settings_manager.get_fullscreen_copy_on_select(),
+                scroll_to_end_indicator=lambda: theme.bg(
+                    "selectedBg", theme.fg("text", " ↓ Jump to latest message ")
+                ),
+            )
+        )
+        if isinstance(self._ui, TuiAltScreen):
+            self._ui.set_exit_output(self._session.settings_manager.get_fullscreen_exit_output())
+            self._ui.set_scrollbar(self._session.settings_manager.get_fullscreen_scrollbar())
+        for child in children:
+            self._ui.add_child(child)
+        if self._editor is not None:
+            self._editor.tui = self._ui
+        if self._theme_controller is not None:
+            self._theme_controller.rebind_tui(self._ui)
+        self._setup_input_handlers()
+        self._ui.start()
+        if focused is not None:
+            self._ui.set_focus(focused)
+        self._ui.request_render(force=True)
+
+    def _markdown_transformers(self) -> list[Any]:
+        runner = getattr(self._session, "_extension_runner", None)
+        if runner is None:
+            return []
+        return runner.get_markdown_transformers()
 
     async def init(self) -> None:
         if self._is_initialized:
@@ -929,11 +996,19 @@ class InteractiveMode:
                 if user_message:
                     self._chat_container.add_child(Spacer(1))
                     self._chat_container.add_child(
-                        UserMessageComponent(user_message, output_pad=self._output_pad)
+                        UserMessageComponent(
+                            user_message,
+                            output_pad=self._output_pad,
+                            markdown_transformers=self._markdown_transformers(),
+                        )
                     )
             else:
                 self._chat_container.add_child(
-                    UserMessageComponent(text_content, output_pad=self._output_pad)
+                    UserMessageComponent(
+                        text_content,
+                        output_pad=self._output_pad,
+                        markdown_transformers=self._markdown_transformers(),
+                    )
                 )
             if (
                 populate_history
@@ -947,6 +1022,7 @@ class InteractiveMode:
                 message,
                 hide_thinking_block=self._hide_thinking_block,
                 output_pad=self._output_pad,
+                markdown_transformers=self._markdown_transformers(),
             )
             self._chat_container.add_child(component)
             return
@@ -1132,6 +1208,7 @@ class InteractiveMode:
             message,
             hide_thinking_block=self._hide_thinking_block,
             output_pad=self._output_pad,
+            markdown_transformers=self._markdown_transformers(),
         )
         self._chat_container.add_child(self._streaming_component)
 
@@ -1156,6 +1233,7 @@ class InteractiveMode:
                             message,
                             hide_thinking_block=self._hide_thinking_block,
                             output_pad=self._output_pad,
+                            markdown_transformers=self._markdown_transformers(),
                         )
                     )
             return
@@ -1365,6 +1443,9 @@ class InteractiveMode:
         if command == "model":
             await self._handle_model_command(argument or None)
             return
+        if command == "thinking":
+            self._handle_thinking_command(argument or None)
+            return
         if command == "provider":
             # Always open the provider-first picker (optional filter: /provider cursor).
             self._show_model_selector(argument or None)
@@ -1534,6 +1615,54 @@ class InteractiveMode:
 
         self._show_selector(create)
 
+    def _handle_thinking_command(self, search: str | None) -> None:
+        available_levels = self._session.get_available_thinking_levels()
+        if not search:
+            self._show_thinking_selector()
+            return
+        normalized = search.strip().lower()
+        level = next((candidate for candidate in available_levels if candidate.lower() == normalized), None)
+        if level is None:
+            self._show_error(
+                f'Unknown thinking level "{search}". Available levels: {", ".join(available_levels)}.'
+            )
+            return
+        self._select_thinking_level(level, persist=False)
+
+    def _select_thinking_level(self, level: str, persist: bool) -> None:
+        try:
+            self._session.set_thinking_level(level, persist=persist)  # type: ignore[arg-type]
+            if self._footer is not None:
+                self._footer.invalidate()
+            label = "Default thinking level" if persist else "Thinking level"
+            self._show_status(theme.fg("success", f"{label}: {level}"))
+        except Exception as error:
+            self._show_error(str(error))
+
+    def _show_thinking_selector(self) -> None:
+        if self._ui is None:
+            return
+
+        def create(done: Callable[[], None]) -> tuple[Container, Container]:
+            def on_select(level: str) -> None:
+                self._select_thinking_level(level, persist=False)
+                done()
+
+            def on_cancel() -> None:
+                done()
+                if self._ui is not None:
+                    self._ui.request_render()
+
+            selector = ThinkingSelectorComponent(
+                self._session.thinking_level or "off",  # type: ignore[arg-type]
+                available_levels=self._session.get_available_thinking_levels(),
+                on_select=on_select,
+                on_cancel=on_cancel,
+            )
+            return selector, selector
+
+        self._show_selector(create)
+
     async def _set_model(self, model: Model[Any]) -> None:
         try:
             await self._session.set_model(model)
@@ -1574,7 +1703,7 @@ class InteractiveMode:
                     self_outer._session.set_follow_up_mode(mode)  # type: ignore[arg-type]
 
                 def on_thinking_level_change(self, level: str) -> None:
-                    self_outer._session.set_thinking_level(level)  # type: ignore[arg-type]
+                    self_outer._session.set_thinking_level(level, persist=True)  # type: ignore[arg-type]
                     if self_outer._footer is not None:
                         self_outer._footer.invalidate()
 
@@ -1611,11 +1740,30 @@ class InteractiveMode:
                 def on_collapse_changelog_change(self, collapsed: bool) -> None:
                     self_outer._session.settings_manager.set_collapse_changelog(collapsed)
 
-                def on_quiet_startup_change(self, enabled: bool) -> None:
-                    self_outer._session.settings_manager.set_quiet_startup(enabled)
+                def on_quiet_startup_change(self, enabled: bool | str) -> None:
+                    self_outer._session.settings_manager.set_quiet_startup(enabled)  # type: ignore[arg-type]
 
                 def on_tree_filter_mode_change(self, mode: str) -> None:
                     self_outer._session.settings_manager.set_tree_filter_mode(mode)  # type: ignore[arg-type]
+
+                def on_tui_mode_change(self, mode: str) -> None:
+                    self_outer._session.settings_manager.set_tui_mode(mode)  # type: ignore[arg-type]
+                    self_outer._apply_tui_mode(mode)  # type: ignore[arg-type]
+
+                def on_fullscreen_exit_output_change(self, output: str) -> None:
+                    self_outer._session.settings_manager.set_fullscreen_exit_output(output)  # type: ignore[arg-type]
+                    if isinstance(self_outer._ui, TuiAltScreen):
+                        self_outer._ui.set_exit_output(output)
+
+                def on_fullscreen_scrollbar_change(self, mode: str) -> None:
+                    self_outer._session.settings_manager.set_fullscreen_scrollbar(mode)  # type: ignore[arg-type]
+                    if isinstance(self_outer._ui, TuiAltScreen):
+                        self_outer._ui.set_scrollbar(mode)
+
+                def on_fullscreen_copy_on_select_change(self, enabled: bool) -> None:
+                    self_outer._session.settings_manager.set_fullscreen_copy_on_select(enabled)
+                    if isinstance(self_outer._ui, TuiAltScreen):
+                        self_outer._ui.set_copy_on_select(enabled)
 
                 def on_cancel(self) -> None:
                     done()

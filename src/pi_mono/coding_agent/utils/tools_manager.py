@@ -52,9 +52,10 @@ def _command_exists(command: str) -> bool:
             [command, "--version"],
             capture_output=True,
             check=False,
+            timeout=5,
         )
         return completed.returncode == 0
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
 

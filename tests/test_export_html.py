@@ -266,6 +266,30 @@ def test_generate_html_uses_shared_template_not_minimal_pre_blocks() -> None:
     assert payload["entries"][2]["message"]["toolName"] == "bash"
 
 
+def test_generate_html_includes_hidden_custom_message_toggle() -> None:
+    session_data = {
+        "header": {"type": "session", "id": "x", "cwd": "/tmp", "timestamp": "2026-01-01T00:00:00Z"},
+        "entries": [
+            {
+                "type": "custom_message",
+                "id": "hidden-1",
+                "parentId": None,
+                "timestamp": "2026-01-01T00:00:00Z",
+                "customType": "internal",
+                "content": "hidden content",
+                "display": False,
+            }
+        ],
+        "leafId": "hidden-1",
+    }
+
+    html = generate_html(session_data)
+    assert "hook-message-hidden" in html
+    assert "toggle-hidden-messages" in html
+    assert "Hidden in terminal" in html
+    assert _session_payload(html)["entries"][0]["display"] is False
+
+
 class _ExportSession:
     def __init__(self, session_manager: SessionManager) -> None:
         self.session_manager = session_manager

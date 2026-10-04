@@ -8,11 +8,12 @@ from openai import AzureOpenAI
 from pi_mono.ai.models import clamp_thinking_level
 from pi_mono.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from pi_mono.ai.providers.openai_responses_shared import (
+    OpenAIResponsesStreamOptions,
     convert_responses_messages,
     convert_responses_tools,
     process_responses_stream,
 )
-from pi_mono.ai.providers.simple_options import build_base_options
+from pi_mono.ai.providers.simple_options import build_base_options, resolve_sampling_params
 from pi_mono.ai.utils.event_stream import AssistantMessageEventStream
 from pi_mono.ai.utils.headers import headers_to_record
 
@@ -192,6 +193,18 @@ def _build_params(
         elif model.get("thinkingLevelMap", {}).get("off") is not None:
             params["reasoning"] = {"effort": model["thinkingLevelMap"]["off"]}
 
+    # Last so model and request sampling parameters override named request fields.
+    thinking_level = "off"
+    if options:
+        thinking_level = options.get("reasoningEffort") or "off"
+        if thinking_level == "off" and options.get("reasoningSummary"):
+            thinking_level = "medium"
+    sampling_params = resolve_sampling_params(
+        model, thinking_level, options.get("samplingParams") if options else None
+    )
+    if sampling_params:
+        params.update(sampling_params)
+
     return params
 
 
@@ -265,7 +278,17 @@ def stream_azure_openai_responses(
 
             stream.push({"type": "start", "partial": output})
 
-            await process_responses_stream(response, output, stream, model, {})
+            await process_responses_stream(
+                response,
+                output,
+                stream,
+                model,
+                OpenAIResponsesStreamOptions(
+                    on_provider_stream_event=(
+                        options.get("onProviderStreamEvent") if options else None
+                    )
+                ),
+            )
 
             if options and options.get("signal", {}).get("aborted"):
                 raise RuntimeError("Request was aborted")

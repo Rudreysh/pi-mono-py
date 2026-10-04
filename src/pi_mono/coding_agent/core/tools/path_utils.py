@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from typing import Any
+
 from pi_mono.utils.paths import normalize_path, resolve_path
 
 NARROW_NO_BREAK_SPACE = "\u202f"
@@ -34,6 +36,22 @@ async def path_exists(file_path: str) -> bool:
 
 def expand_path(file_path: str) -> str:
     return normalize_path(file_path, normalize_unicode_spaces=True, strip_at_prefix=True)
+
+
+def resolve_execution_cwd(default_cwd: str, ctx: Any = None) -> str:
+    """Prefer ``ctx.cwd`` when a tool call provides an execution context."""
+    if ctx is None:
+        return default_cwd
+    cwd = getattr(ctx, "cwd", None)
+    if cwd is None and isinstance(ctx, dict):
+        cwd = ctx.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        return cwd
+    return default_cwd
+
+
+def strip_utf8_bom(text: str) -> str:
+    return text.lstrip("\ufeff")
 
 
 def resolve_to_cwd(file_path: str, cwd: str) -> str:

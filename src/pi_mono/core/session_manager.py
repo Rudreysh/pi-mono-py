@@ -525,6 +525,7 @@ class SessionManager:
         session_file: Optional[str],
         persist: bool,
         new_session_options: Optional[Dict[str, Any]] = None,
+        preloaded_file_entries: Optional[List[Dict[str, Any]]] = None,
     ):
         self.cwd = resolve_path(cwd)
         self.session_dir = normalize_path(session_dir)
@@ -543,6 +544,8 @@ class SessionManager:
 
         if session_file:
             self.set_session_file(session_file)
+        elif preloaded_file_entries:
+            self._load_entries(preloaded_file_entries, new_session_options)
         else:
             self.new_session(new_session_options)
 
@@ -559,18 +562,28 @@ class SessionManager:
                 self.flushed = True
                 return
 
-            header = next((e for e in self.file_entries if e.get("type") == "session"), None)
-            self.sessionId = str(header["id"]) if header else create_session_id()
-
-            if migrate_to_current_version(self.file_entries):
-                self._rewrite_file()
-
-            self._build_index()
+            self._load_entries(self.file_entries)
             self.flushed = True
         else:
             explicit_path = self.sessionFile
             self.new_session()
             self.sessionFile = explicit_path
+
+    def _load_entries(
+        self,
+        entries: List[Dict[str, Any]],
+        options: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        header = next((e for e in entries if e.get("type") == "session"), None)
+        if header:
+            self.file_entries = entries
+            self.sessionId = str(header["id"])
+            if migrate_to_current_version(self.file_entries):
+                self._rewrite_file()
+        else:
+            self.new_session(options)
+            self.file_entries = self.file_entries + list(entries)
+        self._build_index()
 
     def new_session(self, options: Optional[Dict[str, Any]] = None) -> Optional[str]:
         if options and options.get("id") is not None:
@@ -645,23 +658,22 @@ class SessionManager:
     def get_session_file(self) -> Optional[str]:
         return self.sessionFile
 
+    def _has_conversation(self) -> bool:
+        """Return whether the session has a user or assistant message to persist."""
+        return any(
+            entry.get("type") == "message"
+            and entry.get("message", {}).get("role") in ("user", "assistant")
+            for entry in self.file_entries
+        )
+
     def _persist(self, entry: Dict[str, Any]) -> None:
         if not self.persist or not self.sessionFile:
             return
 
-        has_assistant = any(
-            e.get("type") == "message" and e.get("message", {}).get("role") == "assistant"
-            for e in self.file_entries
-        )
-        if not has_assistant:
-            if self.flushed:
-                with open(self.sessionFile, "a", encoding="utf-8") as f:
-                    f.write(f"{json.dumps(entry)}\n")
-            else:
-                self.flushed = False
-            return
-
         if not self.flushed:
+            # Keep setup-only sessions in memory, but preserve the first prompt if its turn aborts.
+            if not self._has_conversation():
+                return
             try:
                 fd = os.open(self.sessionFile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -922,7 +934,25 @@ class SessionManager:
         if len(path) == 0:
             raise ValueError(f"Entry {leaf_id} not found")
 
-        path_without_labels = [e for e in path if e.get("type") != "label"]
+        path_without_labels: list[Dict[str, Any]] = []
+        replacement_by_label_id: dict[str, str] = {}
+        pending_label_ids: list[str] = []
+        path_parent_id: Optional[str] = None
+        for entry in path:
+            if entry.get("type") == "label":
+                pending_label_ids.append(str(entry["id"]))
+                continue
+            for label_id in pending_label_ids:
+                replacement_by_label_id[label_id] = str(entry["id"])
+            pending_label_ids.clear()
+            rewritten = {**entry, "parentId": path_parent_id}
+            if entry.get("type") == "compaction":
+                first_kept = entry.get("firstKeptEntryId")
+                rewritten["firstKeptEntryId"] = replacement_by_label_id.get(
+                    str(first_kept), first_kept
+                )
+            path_without_labels.append(rewritten)
+            path_parent_id = str(entry["id"])
 
         new_session_id = create_session_id()
         timestamp = datetime.utcnow().isoformat() + "Z"
@@ -974,11 +1004,7 @@ class SessionManager:
             self.sessionFile = new_session_file
             self._build_index()
 
-            has_assistant = any(
-                e.get("type") == "message" and e.get("message", {}).get("role") == "assistant"
-                for e in self.file_entries
-            )
-            if has_assistant:
+            if self._has_conversation():
                 self._rewrite_file()
                 self.flushed = True
             else:
@@ -1035,8 +1061,13 @@ class SessionManager:
         return cls(cwd, dir_path, None, True)
 
     @classmethod
-    def in_memory(cls, cwd: str = os.getcwd()) -> "SessionManager":
-        return cls(cwd, "", None, False)
+    def in_memory(
+        cls,
+        cwd: str = os.getcwd(),
+        options: Optional[Dict[str, Any]] = None,
+        entries: Optional[List[Dict[str, Any]]] = None,
+    ) -> "SessionManager":
+        return cls(cwd, "", None, False, options, entries)
 
     @classmethod
     def fork_from(

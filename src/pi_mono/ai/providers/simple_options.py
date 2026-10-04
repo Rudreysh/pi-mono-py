@@ -2,9 +2,12 @@
 
 from typing import Any
 
+from pi_mono.ai.models import clamp_thinking_level
 from pi_mono.ai.types import (
     Context,
     Model,
+    ModelThinkingLevel,
+    SamplingParams,
     SimpleStreamOptions,
     StreamOptions,
     ThinkingBudgets,
@@ -27,6 +30,27 @@ def clamp_max_tokens_to_context(model: Model[Any], context: Context, max_tokens:
     return min(max_tokens, max(MIN_MAX_TOKENS, available))
 
 
+def resolve_sampling_params(
+    model: Model[Any],
+    thinking_level: ModelThinkingLevel,
+    request_params: SamplingParams | None = None,
+) -> SamplingParams | None:
+    effective = clamp_thinking_level(model, thinking_level)
+    by_level = model.get("samplingParamsByThinkingLevel") or {}
+    thinking_level_params = by_level.get(effective)
+    model_params = model.get("samplingParams")
+    if not model_params and not thinking_level_params and not request_params:
+        return None
+    merged: SamplingParams = {}
+    if isinstance(model_params, dict):
+        merged.update(model_params)
+    if isinstance(thinking_level_params, dict):
+        merged.update(thinking_level_params)
+    if isinstance(request_params, dict):
+        merged.update(request_params)
+    return merged
+
+
 def build_base_options(
     model: Model[Any],
     context: Context,
@@ -38,8 +62,12 @@ def build_base_options(
     requested_max_tokens = opts.get("maxTokens")
     if requested_max_tokens is None:
         requested_max_tokens = int(model.get("maxTokens") or 0)
+    sampling_params = resolve_sampling_params(
+        model, opts.get("reasoning") or "off", opts.get("samplingParams")
+    )
     return {
         "temperature": opts.get("temperature"),
+        "samplingParams": sampling_params,
         "maxTokens": clamp_max_tokens_to_context(model, context, int(requested_max_tokens)),
         "signal": opts.get("signal"),
         "apiKey": api_key or opts.get("apiKey"),
@@ -49,6 +77,7 @@ def build_base_options(
         "headers": opts.get("headers"),
         "onPayload": opts.get("onPayload"),
         "onResponse": opts.get("onResponse"),
+        "onProviderStreamEvent": opts.get("onProviderStreamEvent"),
         "timeoutMs": opts.get("timeoutMs"),
         "websocketConnectTimeoutMs": opts.get("websocketConnectTimeoutMs"),
         "maxRetries": opts.get("maxRetries"),

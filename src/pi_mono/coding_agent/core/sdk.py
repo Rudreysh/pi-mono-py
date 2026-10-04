@@ -203,6 +203,7 @@ async def create_agent_session(
         thinking_level = clamp_thinking_level(model, thinking_level)  # type: ignore[assignment]
 
     default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
+    configured_default_tool_names = settings_manager.get_default_tools()
     if opts.tools is not None:
         allowed_tool_names = opts.tools
     elif opts.no_tools == "all":
@@ -218,8 +219,9 @@ async def create_agent_session(
     elif opts.no_tools:
         initial_active_tool_names = []
     else:
+        builtin_defaults = configured_default_tool_names or default_active_tool_names
         initial_active_tool_names = [
-            name for name in default_active_tool_names if name not in excluded_tool_name_set
+            name for name in builtin_defaults if name not in excluded_tool_name_set
         ]
 
     async def stream_fn(
@@ -300,8 +302,23 @@ async def create_agent_session(
                 }
             )
 
+        async def on_provider_stream_event(data: Any, stream_model: Model[Any]) -> None:
+            runner = extension_runner_ref[0]
+            if runner is None or not runner.has_handlers("provider_stream_event"):
+                return
+            await runner.emit(
+                {
+                    "type": "provider_stream_event",
+                    "provider": stream_model["provider"],
+                    "api": stream_model["api"],
+                    "model": stream_model["id"],
+                    "data": data,
+                }
+            )
+
         merged_options["onPayload"] = on_payload
         merged_options["onResponse"] = on_response
+        merged_options["onProviderStreamEvent"] = on_provider_stream_event
         return stream_simple(selected_model, context, merged_options)
 
     extension_runner_ref: list[ExtensionRunner | None] = [None]

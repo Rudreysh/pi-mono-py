@@ -9,6 +9,7 @@ from mistralai.client import Mistral
 from mistralai.client.types import UNSET
 
 from pi_mono.ai.models import calculate_cost, clamp_thinking_level
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.types import (
     AssistantMessage,
     Context,
@@ -466,6 +467,7 @@ async def consume_chat_stream(
     stream: AssistantMessageEventStream,
     mistral_stream: Any,
     signal: Optional[Any] = None,
+    options: dict[str, Any] | None = None,
 ) -> None:
     """Consumes the speakeasy event stream and yields standardized events."""
     output_dict = cast(Dict[str, Any], output)
@@ -500,6 +502,7 @@ async def consume_chat_stream(
             )
 
     async for event in mistral_stream:
+        await emit_provider_stream_event(options, event.data, model)
         if signal and getattr(signal, "aborted", False):
             output_dict["stopReason"] = "aborted"
             break
@@ -540,6 +543,10 @@ async def consume_chat_stream(
                 for item_val in content_items:
                     if isinstance(item_val, str):
                         text_delta = sanitize_surrogates(item_val)
+                        # GLM models emit empty deltas around thinking and tool calls.
+                        # Opening a text block here would split the thinking replay.
+                        if not text_delta:
+                            continue
                         if not current_block or current_block.get("type") != "text":
                             finish_current_block(current_block)
                             current_block = {"type": "text", "text": ""}
@@ -602,6 +609,8 @@ async def consume_chat_stream(
 
                     if item_type == "text":
                         text_delta = sanitize_surrogates(safe_get(item, "text", ""))
+                        if not text_delta:
+                            continue
                         if not current_block or current_block.get("type") != "text":
                             finish_current_block(current_block)
                             current_block = {"type": "text", "text": ""}
@@ -760,7 +769,7 @@ def stream_mistral(
             stream.push({"type": "start", "partial": output})
 
             await consume_chat_stream(
-                model, output, stream, mistral_stream, options_dict.get("signal")
+                model, output, stream, mistral_stream, options_dict.get("signal"), options_dict
             )
 
             signal = options_dict.get("signal")

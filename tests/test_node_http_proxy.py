@@ -32,6 +32,8 @@ def test_no_proxy_matching(monkeypatch):
     assert resolve_http_proxy_url_for_target("http://foo.local") is None
     # bar.example.com should be bypassed
     assert resolve_http_proxy_url_for_target("http://bar.example.com") is None
+    # example.com itself is also bypassed for *.example.com
+    assert resolve_http_proxy_url_for_target("http://example.com") is None
     # specific.host at 8081 should be bypassed
     assert resolve_http_proxy_url_for_target("http://specific.host:8081") is None
     # specific.host at 8080 should STILL proxy

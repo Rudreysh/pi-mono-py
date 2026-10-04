@@ -107,7 +107,7 @@ async def test_resize_failure_returns_text_only_output(tmp_path: Path) -> None:
     image_path = _write_png(tmp_path)
 
     with patch(
-        "pi_mono.coding_agent.core.tools.read.resize_image",
+        "pi_mono.utils.image_process.resize_image",
         return_value=None,
     ):
         result = await execute_read(str(tmp_path), str(image_path))

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from pi_mono.agent.harness.env.local import LocalExecutionEnv
 from pi_mono.agent.harness.prompt_templates import load_prompt_templates
-from pi_mono.agent.harness.skills import load_skills
 from pi_mono.agent.harness.types import PromptTemplate, Skill
 from pi_mono.coding_agent.core.extensions.loader import (
     collect_configured_extension_paths,
@@ -39,12 +38,16 @@ def _empty_extensions_result() -> LoadExtensionsResult:
     )
 
 
+def _read_text_file(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8-sig")
+
+
 def _resolve_prompt_input(input_value: str | None, description: str) -> str | None:
     if not input_value:
         return None
     if os.path.exists(input_value):
         try:
-            return Path(input_value).read_text(encoding="utf-8")
+            return _read_text_file(input_value)
         except OSError as error:
             print(f"Warning: Could not read {description} file {input_value}: {error}")
             return input_value
@@ -52,11 +55,11 @@ def _resolve_prompt_input(input_value: str | None, description: str) -> str | No
 
 
 def _load_context_file_from_dir(directory: str) -> dict[str, str] | None:
-    for filename in ("AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
+    for filename in ("AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
         file_path = os.path.join(directory, filename)
         if os.path.exists(file_path):
             try:
-                return {"path": file_path, "content": Path(file_path).read_text(encoding="utf-8")}
+                return {"path": file_path, "content": _read_text_file(file_path)}
             except OSError as error:
                 print(f"Warning: Could not read {file_path}: {error}")
     return None

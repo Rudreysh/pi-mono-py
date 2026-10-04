@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import platform
 import re
 import time
 from typing import Any, AsyncIterator
 
 import httpx
 
+from pi_mono.utils.abort_signals import is_aborted
+from pi_mono.utils.pi_user_agent import get_pi_user_agent
 from pi_mono.ai.models import clamp_thinking_level
 from pi_mono.ai.providers.openai_prompt_cache import clamp_openai_prompt_cache_key
 from pi_mono.ai.providers.openai_responses_shared import (
@@ -22,6 +23,7 @@ from pi_mono.ai.providers.openai_responses_shared import (
     convert_responses_tools,
     process_responses_stream,
 )
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.providers.simple_options import build_base_options
 from pi_mono.ai.types import (
     AssistantMessage,
@@ -105,17 +107,18 @@ def _get_retry_after_delay_ms(headers: httpx.Headers) -> int | None:
         return None
 
 
+def _option_int(options: StreamOptions | None, key: str, default: int) -> int:
+    raw = options.get(key) if options else None
+    return default if raw is None else int(raw)
+
+
 def _cap_retry_delay_ms(delay_ms: int, options: StreamOptions | None) -> int:
-    max_retry_delay_ms = (
-        options.get("maxRetryDelayMs", DEFAULT_MAX_RETRY_DELAY_MS)
-        if options
-        else DEFAULT_MAX_RETRY_DELAY_MS
-    )
+    max_retry_delay_ms = _option_int(options, "maxRetryDelayMs", DEFAULT_MAX_RETRY_DELAY_MS)
     return min(delay_ms, max_retry_delay_ms) if max_retry_delay_ms > 0 else delay_ms
 
 
 async def _sleep(ms: int, signal: Any | None = None) -> None:
-    if signal and signal.get("aborted"):
+    if is_aborted(signal):
         raise RuntimeError("Request was aborted")
     await asyncio.sleep(ms / 1000)
 
@@ -166,7 +169,7 @@ def _build_base_codex_headers(
     headers["Authorization"] = f"Bearer {token}"
     headers["chatgpt-account-id"] = account_id
     headers["originator"] = "pi"
-    headers["User-Agent"] = f"pi ({platform.system()} {platform.release()}; {platform.machine()})"
+    headers["User-Agent"] = get_pi_user_agent()
     return headers
 
 
@@ -274,16 +277,22 @@ def _build_request_body(
         )
 
     reasoning_effort = options.get("reasoningEffort") if options else None
+    thinking_map = model.get("thinkingLevelMap") or {}
     if reasoning_effort is not None:
-        thinking_map = model.get("thinkingLevelMap", {})
-        effort = (
-            thinking_map.get("off", "none")
-            if reasoning_effort == "none"
-            else thinking_map.get(reasoning_effort, reasoning_effort)
-        )
+        if reasoning_effort == "none":
+            effort = thinking_map["off"] if "off" in thinking_map else "none"
+        else:
+            effort = thinking_map.get(reasoning_effort, reasoning_effort)
         if effort is not None:
             body["reasoning"] = {
                 "effort": effort,
+                "summary": (options or {}).get("reasoningSummary", "auto"),
+            }
+    elif model.get("reasoning"):
+        off_is_explicit_null = isinstance(thinking_map, dict) and "off" in thinking_map and thinking_map["off"] is None
+        if not off_is_explicit_null:
+            body["reasoning"] = {
+                "effort": thinking_map.get("off") or "none",
                 "summary": (options or {}).get("reasoningSummary", "auto"),
             }
 
@@ -313,8 +322,13 @@ def _normalize_codex_status(status: Any) -> str | None:
 
 async def _map_codex_events(
     events: AsyncIterator[dict[str, Any]],
+    model: Model[Any],
+    on_provider_stream_event: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     async for event in events:
+        await emit_provider_stream_event(
+            {"onProviderStreamEvent": on_provider_stream_event}, event, model
+        )
         event_type = event.get("type")
         if not isinstance(event_type, str):
             continue
@@ -354,7 +368,7 @@ async def _parse_sse(
 ) -> AsyncIterator[dict[str, Any]]:
     buffer = ""
     async for chunk in response.aiter_text():
-        if signal and signal.get("aborted"):
+        if is_aborted(signal):
             raise RuntimeError("Request was aborted")
         buffer += chunk
         while "\n\n" in buffer:
@@ -371,10 +385,26 @@ async def _parse_sse(
                 raise CodexProtocolError(
                     f"Invalid Codex SSE JSON: {error}", payload=data
                 ) from error
+    if buffer.strip():
+        buffer += "\n\n"
+        part, _rest = buffer.split("\n\n", 1)
+        data_lines = [line[5:].strip() for line in part.split("\n") if line.startswith("data:")]
+        if data_lines:
+            data = "\n".join(data_lines).strip()
+            if data and data != "[DONE]":
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError as error:
+                    raise CodexProtocolError(
+                        f"Invalid Codex SSE JSON: {error}", payload=data
+                    ) from error
 
 
-async def _parse_error_response(response: httpx.Response) -> dict[str, str | None]:
-    raw = response.text
+def _parse_error_response(
+    response: httpx.Response, raw: str | None = None
+) -> dict[str, str | None]:
+    if raw is None:
+        raw = response.text
     message = raw or response.reason_phrase or "Request failed"
     friendly_message: str | None = None
     try:
@@ -426,6 +456,7 @@ def stream_openai_codex_responses(
         }
 
         try:
+            signal = options.get("signal") if options else None
             api_key = options.get("apiKey") if options else None
             if not api_key:
                 raise ValueError(f"No API key for provider: {model['provider']}")
@@ -450,99 +481,110 @@ def stream_openai_codex_responses(
             if compressed is not None:
                 sse_headers["content-encoding"] = "zstd"
                 request_content = compressed
-            max_retries = (
-                options.get("maxRetries", DEFAULT_MAX_RETRIES) if options else DEFAULT_MAX_RETRIES
-            )
-            response: httpx.Response | None = None
+            max_retries = _option_int(options, "maxRetries", DEFAULT_MAX_RETRIES)
             last_error: Exception | None = None
+            timeout = httpx.Timeout(
+                DEFAULT_SSE_HEADER_TIMEOUT_MS / 1000,
+                read=None,
+            )
 
-            for attempt in range(max_retries + 1):
-                if options and options.get("signal", {}).get("aborted"):
-                    raise RuntimeError("Request was aborted")
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for attempt in range(max_retries + 1):
+                    if is_aborted(signal):
+                        raise RuntimeError("Request was aborted")
 
-                try:
-                    timeout = httpx.Timeout(
-                        DEFAULT_SSE_HEADER_TIMEOUT_MS / 1000,
-                        read=None,
-                    )
-                    async with httpx.AsyncClient(timeout=timeout) as client:
-                        response = await client.post(
+                    try:
+                        async with client.stream(
+                            "POST",
                             _resolve_codex_url(model.get("baseUrl")),
                             headers=sse_headers,
                             content=request_content,
+                        ) as response:
+                            if options and options.get("onResponse"):
+                                await options["onResponse"](
+                                    {
+                                        "status": response.status_code,
+                                        "headers": headers_to_record(response.headers),
+                                    },
+                                    model,
+                                )
+
+                            if not response.is_success:
+                                error_text = (await response.aread()).decode(
+                                    "utf-8", errors="replace"
+                                )
+                                if attempt < max_retries and _is_retryable_error(
+                                    response.status_code, error_text
+                                ):
+                                    retry_after_delay_ms = _get_retry_after_delay_ms(
+                                        response.headers
+                                    )
+                                    if retry_after_delay_ms is None:
+                                        delay_ms = BASE_DELAY_MS * (2**attempt)
+                                    elif response.status_code == 429:
+                                        delay_ms = _cap_retry_delay_ms(
+                                            retry_after_delay_ms, options
+                                        )
+                                    else:
+                                        delay_ms = retry_after_delay_ms
+                                    await _sleep(delay_ms, signal)
+                                    continue
+
+                                info = _parse_error_response(response, error_text)
+                                raise RuntimeError(info.get("friendlyMessage") or info["message"])
+
+                            stream.push({"type": "start", "partial": output})
+                            events = _map_codex_events(
+                                _parse_sse(response, signal),
+                                model,
+                                options.get("onProviderStreamEvent") if options else None,
+                            )
+                            await process_responses_stream(
+                                events,
+                                output,
+                                stream,
+                                model,
+                                OpenAIResponsesStreamOptions(
+                                    service_tier=(
+                                        options.get("serviceTier") if options else None
+                                    ),
+                                    resolve_service_tier=_resolve_codex_service_tier,
+                                    apply_service_tier_pricing=(
+                                        lambda usage, service_tier: _apply_service_tier_pricing(
+                                            usage, service_tier, model["id"]
+                                        )
+                                    ),
+                                ),
+                            )
+
+                            if is_aborted(signal):
+                                raise RuntimeError("Request was aborted")
+
+                            stream.push(
+                                {
+                                    "type": "done",
+                                    "reason": output["stopReason"],
+                                    "message": output,
+                                }
+                            )
+                            stream.end()
+                            return
+                    except Exception as error:
+                        if isinstance(error, RuntimeError) and str(error) == "Request was aborted":
+                            raise
+                        last_error = (
+                            error if isinstance(error, Exception) else RuntimeError(str(error))
                         )
+                        if attempt < max_retries and "usage limit" not in str(last_error):
+                            await _sleep(BASE_DELAY_MS * (2**attempt), signal)
+                            continue
+                        raise last_error
 
-                    if options and options.get("onResponse"):
-                        await options["onResponse"](
-                            {
-                                "status": response.status_code,
-                                "headers": headers_to_record(response.headers),
-                            },
-                            model,
-                        )
-
-                    if response.is_success:
-                        break
-
-                    error_text = response.text
-                    if attempt < max_retries and _is_retryable_error(
-                        response.status_code, error_text
-                    ):
-                        retry_after_delay_ms = _get_retry_after_delay_ms(response.headers)
-                        if retry_after_delay_ms is None:
-                            delay_ms = BASE_DELAY_MS * (2**attempt)
-                        elif response.status_code == 429:
-                            delay_ms = _cap_retry_delay_ms(retry_after_delay_ms, options)
-                        else:
-                            delay_ms = retry_after_delay_ms
-                        await _sleep(delay_ms, options.get("signal") if options else None)
-                        continue
-
-                    info = await _parse_error_response(response)
-                    raise RuntimeError(info.get("friendlyMessage") or info["message"])
-                except Exception as error:
-                    if isinstance(error, RuntimeError) and str(error) == "Request was aborted":
-                        raise
-                    last_error = error if isinstance(error, Exception) else RuntimeError(str(error))
-                    if attempt < max_retries and "usage limit" not in str(last_error):
-                        await _sleep(
-                            BASE_DELAY_MS * (2**attempt), options.get("signal") if options else None
-                        )
-                        continue
-                    raise last_error
-
-            if response is None or not response.is_success:
-                raise last_error or RuntimeError("Failed after retries")
-
-            stream.push({"type": "start", "partial": output})
-            events = _map_codex_events(
-                _parse_sse(response, options.get("signal") if options else None)
-            )
-            await process_responses_stream(
-                events,
-                output,
-                stream,
-                model,
-                OpenAIResponsesStreamOptions(
-                    service_tier=options.get("serviceTier") if options else None,
-                    resolve_service_tier=_resolve_codex_service_tier,
-                    apply_service_tier_pricing=lambda usage, service_tier: _apply_service_tier_pricing(
-                        usage, service_tier, model["id"]
-                    ),
-                ),
-            )
-
-            if options and options.get("signal", {}).get("aborted"):
-                raise RuntimeError("Request was aborted")
-
-            stream.push({"type": "done", "reason": output["stopReason"], "message": output})
-            stream.end()
+            raise last_error or RuntimeError("Failed after retries")
         except Exception as error:
             for block in output["content"]:
                 block.pop("partialJson", None)
-            output["stopReason"] = (
-                "aborted" if (options and options.get("signal", {}).get("aborted")) else "error"
-            )
+            output["stopReason"] = "aborted" if is_aborted(signal) else "error"
             output["errorMessage"] = str(error)
             stream.push({"type": "error", "reason": output["stopReason"], "error": output})
             stream.end()

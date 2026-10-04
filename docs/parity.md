@@ -15,20 +15,26 @@ This document tracks behavioral parity between the TypeScript packages (`package
 
 | Area | TS source | Python target | Status |
 |------|-----------|---------------|--------|
-| AI providers & models | `packages/ai` | `pi_mono.ai` | **Match** (v0.80: `max` thinking, input pricing tiers, `Usage.reasoning`) |
-| Agent runtime | `packages/agent` | `pi_mono.agent` | **Match** |
-| Terminal UI | `packages/tui` | `pi_mono.tui` | **Match** |
-| Coding agent CLI | `packages/coding-agent` | `pi_mono.coding_agent` | **Partial** (v0.80 ports: RPC get_entries/get_tree, outputPad, externalEditor, shellPath ~) |
+| AI providers & models | `packages/ai` | `pi_mono.ai` | **Partial** | Catalog synced to TS v1.0.2; sampling by thinking level, capacity retries, Z.AI CN overflow. Codemode/classifiers/image unification remain gaps |
+| Agent runtime | `packages/agent` | `pi_mono.agent` | **Partial** | `finishTurn` / `prepareRequest` / `thinkingLevel` on assistant messages; harness still has the pre-1.0 durable surface |
+| Terminal UI | `packages/tui` | `pi_mono.tui` | **Partial** | Fullscreen alt-screen is a working subset (scroll/search/jump); not the full TS renderer |
+| Coding agent CLI | `packages/coding-agent` | `pi_mono.coding_agent` | **Partial** | Fullscreen TUI, powershell, MCP stdio host; `.ts` extensions and Cursor protobuf remain divergences |
+| Protocol | `packages/protocol` | `pi_mono.protocol` | **Partial** | CBOR + length-prefixed framing, protocol version 8 |
+| Client | `packages/client` | `pi_mono.client` | **Partial** | Unix-socket remote client |
+| Server | `packages/server` | `pi_mono.server` | **Partial** | Unix-socket remote server |
+| Telemetry | `packages/telemetry` | `pi_mono.telemetry` | **Partial** | Noop + in-memory spans |
+| Session backends | `packages/session-backends` | `pi_mono.session_backends` | **Partial** | SQLite session repo |
+| Chord | `packages/chord` | `pi_mono.chord` | **Partial** | In-process context + replicated state; no plugin bundles |
 
 ## CLI & modes
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `parseArgs` / CLI flags | **Match** | See `test_phase5_parity.py::TestArgsParity` |
+| `parseArgs` / CLI flags | **Match** | Empty `--models` entries ignored (#10334); `--provider` requires `--model` (#10236) |
 | Print mode (`-p`, `--print`) | **Match** | Text and JSON output |
 | JSON event mode (`--mode json`) | **Match** | |
 | RPC mode (`--mode rpc`) | **Match** | Preflight prompt semantics, `get_commands`, `parentSession` aligned with TS |
-| Interactive TUI | **Partial** | `/model`, `/settings`, `/sessions`, `/tree`, `/scoped-models`, and extension UI use editor-area selectors; model search ranking aligned with TS; extension dialogs support timeout countdown; paste markers + Ctrl+J newline |
+| Interactive TUI | **Partial** | Fullscreen/`tuiMode` alt-screen is available; editor-area selectors remain for overlays |
 | `pi config` | **Match** | `-l` project-local scope, Tab switch, `--approve`/`--no-approve` |
 | Session fork / resume / import | **Match** | |
 | `pi update` self-update | **Partial** | CLI flags present; install path depends on distribution method; version-check failures skip update instead of forcing it |
@@ -76,7 +82,7 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | read / write / edit / bash / grep / find / ls | **Match** | Bash uses `OutputAccumulator` + `fullOutputPath` when truncated | |
 | `fd` / `rg` via tools-manager | **Match** | Auto-download on supported platforms |
 | Image read pipeline (EXIF, convert) | **Match** | Wired into read tool + show-images selector |
-| MCP tools | **Missing** | No in-process MCP runtime; npm MCP adapters still require TS bridge |
+| MCP tools | **Partial** | Stdio JSON-RPC MCP client/host; not the full TS manager |
 
 ## Interactive UI (P3 polish)
 
@@ -158,6 +164,60 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | Python model catalog sync (`generate_models.py --check`) | **Match** (CI + release publish job) |
 | Real-provider e2e (`PI_E2E_PROVIDER`) | **Partial** | Gated pytest marker in `test_e2e_providers.py` |
 
+## v0.86.0–v1.0.2 ports
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `samplingParamsByThinkingLevel` | **Match** | OpenAI completions/responses/Azure + `models.json` overrides |
+| Retry "model is at capacity" | **Match** | `#10278` |
+| Z.AI CN `Prompt exceeds max length` | **Match** | `#10208` |
+| `--models` empty/trailing comma | **Match** | `#10334` |
+| `--provider` without `--model` errors | **Match** | `#10236` |
+| Default TUI mode fullscreen | **Match** | `tuiMode` unset → fullscreen |
+| `quietStartup: "header"` | **Partial** | Settings + selector; startup banner still a subset of TS |
+| Agent `finishTurn` / `prepareRequest` | **Match** | Replaces `shouldStopAfterTurn` |
+| Assistant `thinkingLevel` | **Match** | Recorded on loop results |
+| Codex default `gpt-6.1-sol` | **Match** | `default_model_per_provider` |
+| Model catalog JSON | **Match** | `generate_models.py` exports `MODELS`/`IMAGE_MODELS` from `models.generated.ts` |
+| Codemode / virtual models / classifiers | **Missing** | QuickJS sandbox and unified image/classifier runtime not ported |
+| MCP CIMD / project overrides / OAuth RFC 9207 | **Missing** | Python MCP remains stdio JSON-RPC |
+
+## v0.83.0–v0.85.0 ports
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Tools honor `ctx.cwd` | **Match** | `resolve_execution_cwd()` on read/write/edit/bash/grep/find/ls |
+| Single-object `edits` coercion | **Match** | Object or JSON object string becomes a one-element array |
+| Write success text | **Match** | `Successfully wrote to {path}` (no UTF-16 byte count) |
+| Skills in prompt when bash is the only file-read tool | **Match** | `format_skills_for_system_prompt(..., "bash")` |
+| `AGENTS.override.md` + UTF-8 BOM strip | **Match** | Preferred over `AGENTS.md`; reads use `utf-8-sig` |
+| Root README/AGENTS without skill frontmatter | **Match** | No diagnostics unless basename is `SKILL.md` |
+| CLI `--` end-of-options | **Match** | Remaining args are messages / `@files` |
+| Session import unique destination | **Match** | `name-N.ext` when the basename already exists |
+| Fork/branch compaction `firstKeptEntryId` rewrite | **Match** | Labels stripped from the path are remapped |
+| RPC/session abort cancels compaction | **Match** | Manual + auto compaction AbortControllers |
+| `prepareNextTurn` only before another assistant turn | **Match** | Matches TS agent-loop |
+| `Agent.reset()` while running | **Match** | Raises if `active_run` is set |
+| `BeforeToolCallResult.terminate` | **Match** | Copied onto blocked tool error results |
+| `send_custom_message` + `triggerTurn: false` while streaming | **Match** | Queued until `turn_end`; does not steer |
+| JSON/RPC `message_update` | **Match** | Public events emit usage + assistant delta only |
+| JSON/RPC `toolcall_start` id/name | **Match** | Added in `to_json_event()` |
+| `defaultTools` setting | **Match** | Initial builtin selection; extension tools stay enabled |
+| `/thinking` slash command | **Match** | Selector overlay + `/thinking <level>` |
+| `pi auth check` / `print-api-key` / `print-bearer-token` | **Match** | Wired in `main.py` via `auth_command.py` |
+| RPC `clear_queue` | **Match** | |
+| `session_compact_failed` extension event | **Match** | Manual and auto compaction failures |
+| `expandPromptTemplates` on `send_user_message` | **Match** | Defaults to false; option honored |
+| `NO_PROXY` root + subdomain | **Match** | Exact domain also excludes subdomains |
+| Fullscreen TUI / `tuiMode` | **Match** | `--tui-mode`, `--use-theme`, settings, `TuiAltScreen` |
+| Windows `powershell` tool | **Match** | Same factory/name as TS; Windows-only at exec time |
+| Extension `ui_prompt_start` / `ui_prompt_end` | **Match** | Wrapped select/confirm/input |
+| `pi.registerMarkdownTransformer()` | **Match** | Applied to user/assistant markdown |
+| `SessionManager.in_memory(..., entries=)` | **Match** | Restores external entries |
+| Terminal capability overrides | **Match** | `PI_HYPERLINKS`, `PI_IMAGE_PROTOCOL`, `PI_TRUE_COLOR`, `set_capability_overrides` |
+| Chord / protocol / client / telemetry / v4 sessions | **Partial** | Python modules exist: CBOR framing, unix client/server, sqlite repo, chord context. Not a line-for-line TS replica |
+| Remaining AI streaming adapters (Fireworks GLM, Copilot Fable, etc.) | **Partial** | Mid-convo effort, Fireworks module, Codex SSE EOF flush, vLLM priority, `supportsMaxOutputTokens`, default User-Agent |
+
 ## v0.82.1 ports
 
 | Feature | Status | Notes |
@@ -174,9 +234,9 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | `bash_execution_update` event | **Match** | Emitted from `execute_bash`; `_bash_session_env` adds PI_SESSION_ID/FILE/PROVIDER/MODEL/REASONING_LEVEL |
 | Remote catalog provider | **Partial** | `remote_catalog_provider.py` ETag-aware refresh skeleton; provider-specific parsing is overridable |
 | Extension `ctx.scoped_models` | **Match** | Property on `ExtensionContext` protocol and runner |
-| `pi auth print-api-key` | **Partial** | `credential_print.py` module; not wired into main CLI parser |
+| `pi auth print-api-key` | **Match** | Wired as `pi auth print-api-key` / `print-bearer-token` / `check` |
 | Compaction retry events | **Match** | `summarization_retry_scheduled/attempt_start/finished` event types + callback builder |
-| MCP placeholder | **Match** | `mcp/__init__.py` with `McpClient` stub interface |
+| MCP placeholder | **Partial** | `mcp/__init__.py` stdio JSON-RPC `McpClient` / `McpManager`; not every TS transport |
 
 ## v0.82 P2 ports
 
@@ -186,7 +246,7 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | TUI log directory honours `PI_CODING_AGENT_DIR` | **Match** | `tui.py` debug/crash logs use `get_agent_dir()` instead of hardcoded `~/.pi/agent` |
 | `ToolResultMessage.usage` | **Match** | Optional `Usage` field on `ToolResultMessage` |
 | `app.message.copy` keybinding (Ctrl+X) | **Match** | Default in `DEFAULT_APP_KEYBINDINGS`; handler copies last assistant text to clipboard |
-| Evals stub package | **Partial** | `pi_mono.evals` with placeholder `EvalHarness`; TS vitest harness not ported |
+| Evals stub package | **Partial** | `pi_mono.evals.EvalHarness` runs cases against a complete callback; not the TS vitest plugin |
 | Narrow-terminal scroll indicator guard (#7015) | **Match** | `select_list.py` / `settings_list.py` guard `width <= 0` |
 
 ## Known scope gaps
@@ -195,7 +255,7 @@ These are intentional port boundaries, not open regression items. They stay **Pa
 
 | Area | Status | Notes |
 |------|--------|-------|
-| In-process MCP runtime | **Missing** | No Python MCP host; use TS bridge or external MCP clients |
+| In-process MCP runtime | **Partial** | Stdio JSON-RPC client; not CIMD, project overrides, or full OAuth hardening |
 | TypeScript `.ts` extensions | **Diverge** | Python runs `.py` extensions only |
 | npm extension packages | **Partial** | Package manager resolves extension paths; resource loader + settings wiring; `.py` only (TS npm extensions not executed) |
 | Cursor protobuf proxy | **Diverge** | Python uses CLI bridge (`python/docs/cursor.md`) |

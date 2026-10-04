@@ -132,3 +132,31 @@ def test_agent_session_bind_extensions_creates_runner(tmp_path):
         assert session.extension_runner.get_extension_paths() == []
 
     asyncio.run(run())
+
+
+def test_register_tool_requires_object_parameter_schema():
+    from unittest.mock import MagicMock
+
+    from pi_mono.coding_agent.core.extensions.loader import _ExtensionAPI
+    from pi_mono.coding_agent.core.extensions.types import Extension, ToolDefinition
+    from pi_mono.coding_agent.core.source_info import create_synthetic_source_info
+
+    runtime = MagicMock()
+    runtime.assert_active = MagicMock()
+    runtime.refresh_tools = MagicMock()
+    extension = Extension(
+        path="ext.py",
+        resolved_path="ext.py",
+        source_info=create_synthetic_source_info("ext.py", source="test"),
+    )
+    api = _ExtensionAPI(extension, runtime, cwd=".", event_bus=create_event_bus())
+    with pytest.raises(TypeError, match="object parameter schema"):
+        api.register_tool(
+            ToolDefinition(
+                name="bad",
+                label="bad",
+                description="d",
+                parameters=None,  # type: ignore[arg-type]
+                execute=MagicMock(),
+            )
+        )

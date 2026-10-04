@@ -191,27 +191,22 @@ def _read_clipboard_image_via_win32_powershell() -> ClipboardImage | None:
 
 def _read_clipboard_image_via_xclip() -> ClipboardImage | None:
     targets = _run_command(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
-    candidate_types: list[str] = []
-    if targets is not None:
-        candidate_types = [
-            line.strip()
-            for line in targets.decode("utf-8", errors="replace").splitlines()
-            if line.strip()
-        ]
+    if targets is None:
+        return None
 
-    preferred = _select_preferred_image_mime_type(candidate_types) if candidate_types else None
-    try_types = (
-        [preferred, *SUPPORTED_IMAGE_MIME_TYPES] if preferred else list(SUPPORTED_IMAGE_MIME_TYPES)
-    )
-    seen: set[str] = set()
-    for mime_type in try_types:
-        if mime_type in seen:
-            continue
-        seen.add(mime_type)
-        data = _run_command(["xclip", "-selection", "clipboard", "-t", mime_type, "-o"])
-        if data:
-            return ClipboardImage(bytes=data, mime_type=_base_mime_type(mime_type))
-    return None
+    candidate_types = [
+        line.strip()
+        for line in targets.decode("utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    preferred = _select_preferred_image_mime_type(candidate_types)
+    if preferred is None:
+        return None
+
+    data = _run_command(["xclip", "-selection", "clipboard", "-t", preferred, "-o"])
+    if not data:
+        return None
+    return ClipboardImage(bytes=data, mime_type=_base_mime_type(preferred))
 
 
 def _read_clipboard_image_via_pngpaste() -> ClipboardImage | None:

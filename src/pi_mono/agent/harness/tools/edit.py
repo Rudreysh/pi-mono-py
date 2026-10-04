@@ -49,6 +49,14 @@ EDIT_PARAMETERS: dict[str, Any] = {
 }
 
 
+def _is_single_edit_input(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("oldText"), str)
+        and isinstance(value.get("newText"), str)
+    )
+
+
 def _prepare_edit_arguments(params: dict[str, Any]) -> dict[str, Any]:
     edits = params.get("edits")
     if isinstance(edits, str):
@@ -56,10 +64,16 @@ def _prepare_edit_arguments(params: dict[str, Any]) -> dict[str, Any]:
             parsed = json.loads(edits)
             if isinstance(parsed, list):
                 params = {**params, "edits": parsed}
+            elif _is_single_edit_input(parsed):
+                params = {**params, "edits": [parsed]}
         except json.JSONDecodeError:
             pass
+    elif _is_single_edit_input(edits):
+        params = {**params, "edits": [edits]}
     if "oldText" in params and "newText" in params:
         legacy_edits = list(params.get("edits") or [])
+        if not isinstance(legacy_edits, list):
+            legacy_edits = []
         legacy_edits.append({"oldText": params["oldText"], "newText": params["newText"]})
         params = {k: v for k, v in params.items() if k not in ("oldText", "newText")}
         params["edits"] = legacy_edits

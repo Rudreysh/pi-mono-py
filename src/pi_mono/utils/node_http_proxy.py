@@ -23,6 +23,39 @@ def get_proxy_env(key: str) -> str:
     return os.environ.get(key.lower()) or os.environ.get(key.upper()) or ""
 
 
+def _strip_brackets(host: str) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+def _parse_no_proxy_entry(entry: str) -> tuple[str, int] | None:
+    trimmed = entry.strip().lower()
+    if not trimmed:
+        return None
+    if trimmed.startswith("["):
+        closing = trimmed.find("]")
+        if closing != -1:
+            host = trimmed[1:closing]
+            rest = trimmed[closing + 1 :]
+            if rest.startswith(":"):
+                try:
+                    return host, int(rest[1:])
+                except ValueError:
+                    return host, 0
+            return host, 0
+    if ":" in trimmed and trimmed.count(":") > 1:
+        return trimmed, 0
+    colon_index = trimmed.rfind(":")
+    if colon_index != -1 and colon_index == trimmed.find(":"):
+        host = trimmed[:colon_index]
+        try:
+            return host, int(trimmed[colon_index + 1 :])
+        except ValueError:
+            pass
+    return trimmed, 0
+
+
 def should_proxy_hostname(hostname: str, port: int) -> bool:
     no_proxy = get_proxy_env("no_proxy").lower()
     if not no_proxy:
@@ -30,30 +63,23 @@ def should_proxy_hostname(hostname: str, port: int) -> bool:
     if no_proxy == "*":
         return False
 
-    # Split by commas or spaces
-    for proxy in re.split(r"[,\s]+", no_proxy):
-        if not proxy:
+    normalized_target_host = _strip_brackets(hostname.lower())
+    for entry in re.split(r"[,\s]+", no_proxy):
+        parsed = _parse_no_proxy_entry(entry)
+        if parsed is None:
             continue
-
-        match = re.match(r"^(.+):(\d+)$", proxy)
-        if match:
-            proxy_hostname = match.group(1)
-            proxy_port = int(match.group(2))
-        else:
-            proxy_hostname = proxy
-            proxy_port = 0
-
+        proxy_hostname, proxy_port = parsed
         if proxy_port and proxy_port != port:
             continue
-
-        if not (proxy_hostname.startswith(".") or proxy_hostname.startswith("*")):
-            if hostname == proxy_hostname:
-                return False
-        else:
-            test_host = proxy_hostname[1:] if proxy_hostname.startswith("*") else proxy_hostname
-            if hostname.endswith(test_host):
-                return False
-
+        domain = _strip_brackets(proxy_hostname)
+        if domain.startswith("*."):
+            domain = domain[2:]
+        elif domain.startswith(".") or domain.startswith("*"):
+            domain = domain[1:]
+        if not domain:
+            continue
+        if normalized_target_host == domain or normalized_target_host.endswith(f".{domain}"):
+            return False
     return True
 
 

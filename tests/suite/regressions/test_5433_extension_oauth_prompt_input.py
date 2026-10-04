@@ -101,3 +101,28 @@ async def test_keeps_previous_manual_input_stable_when_later_prompt_is_active(tm
 
     dialog.handle_input("\n")
     assert await prompt == "second-secret-demo"
+
+
+def test_split_bracketed_paste_does_not_raise():
+    from pi_mono.tui.components.input import Input
+
+    field = Input()
+    field.handle_input("\x1b[200~http://localhost:1455/auth/callback?code=ac_abc")
+    field.handle_input(".rest&state=abc123\x1b[201~")
+    assert "code=ac_abc.rest" in field.get_value()
+    assert "state=abc123" in field.get_value()
+
+
+@pytest.mark.anyio
+async def test_pasted_codex_callback_url_submits_without_enter(tmp_path) -> None:
+    _set_test_keybindings(tmp_path)
+    dialog = _create_dialog()
+    manual_input = dialog.show_manual_input("Paste callback URL:")
+    url = (
+        "http://localhost:1455/auth/callback?code=ac_rIDUeTqCAzYHML0bXSOiv0wraCAfUcB2QDWuS8h1ZRY."
+        "LqlRTDkH0_xNA7BUIEN7rEANLTDZYufVByGR0mzW41s&scope=openid+profile+email+offline_access"
+        "&state=7fe4515b9e2d8d04ca0ce02dc6160443"
+    )
+    dialog.handle_input("\x1b[200~" + url[:80])
+    dialog.handle_input(url[80:] + "\x1b[201~")
+    assert await manual_input == url

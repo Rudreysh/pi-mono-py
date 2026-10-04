@@ -359,8 +359,22 @@ class DefaultPackageManager:
         return os.path.join(install_root, "node_modules", source.name)
 
     def _get_git_install_path(self, source: GitSource, scope: SourceScope) -> str:
+        if scope == "temporary":
+            # Pinned refs must not reuse a checkout created for a different ref.
+            return self._get_temporary_dir(f"git-{source.host}", source.path, source.ref)
         install_root = self._get_git_install_root(scope)
         return self._resolve_managed_path(install_root, source.host, source.path)
+
+    def _get_temporary_dir(
+        self,
+        prefix: str,
+        suffix: str | None = None,
+        ref: str | None = None,
+    ) -> str:
+        root = self._resolve_managed_path(get_extension_temp_folder(self._agent_dir), prefix)
+        identity = f"{prefix}-{suffix or ''}{f'@{ref}' if ref else ''}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+        return self._resolve_managed_path(root, digest, suffix or "")
 
     def _resolve_input_path(self, path: str) -> str:
         return resolve_path(path, self._cwd, trim=True, expand_tilde=True)
@@ -934,17 +948,28 @@ class DefaultPackageManager:
 
     def _get_package_manager_name(self) -> str:
         command, args = self._get_npm_command()
-        command_parts = [command, *args]
-        separator_index = (
-            len(command_parts) - 1 - command_parts[::-1].index("--")
-            if "--" in command_parts
-            else -1
+        normalize_command_name = lambda value: re.sub(
+            r"\.(cmd|exe)$", "", os.path.basename(value), flags=re.IGNORECASE
         )
-        package_manager_command = (
-            command_parts[separator_index + 1] if separator_index >= 0 else command
-        )
-        base_name = os.path.basename(package_manager_command)
-        return re.sub(r"\.(cmd|exe)$", "", base_name, flags=re.IGNORECASE)
+        supported = {"npm", "pnpm", "bun"}
+        direct_command = normalize_command_name(command)
+        if "--" in args:
+            separator_index = len(args) - 1 - args[::-1].index("--")
+            wrapped_command = args[separator_index + 1] if separator_index + 1 < len(args) else None
+            return normalize_command_name(wrapped_command) if wrapped_command else direct_command
+        if direct_command in supported:
+            return direct_command
+
+        wrapped_managers = {
+            normalize_command_name(value)
+            for value in args
+            if normalize_command_name(value) in supported
+        }
+        if len(wrapped_managers) > 1:
+            raise ValueError(
+                f"Ambiguous npmCommand package managers: {', '.join(sorted(wrapped_managers))}"
+            )
+        return next(iter(wrapped_managers), direct_command)
 
     def _get_npm_install_args(self, specs: list[str], install_root: str) -> list[str]:
         package_manager_name = self._get_package_manager_name()
@@ -963,10 +988,20 @@ class DefaultPackageManager:
         return ["install", *specs, "--prefix", install_root, "--legacy-peer-deps"]
 
     def _get_git_dependency_install_args(self) -> list[str]:
-        configured = self._settings_manager.get_npm_command()
-        if configured:
-            return ["install"]
-        return ["install", "--omit=dev"]
+        package_manager_name = self._get_package_manager_name()
+        if package_manager_name == "bun":
+            return ["install", "--omit=dev", "--omit=peer"]
+        if package_manager_name == "pnpm":
+            return [
+                "install",
+                "--prod",
+                "--config.auto-install-peers=false",
+                "--config.strict-peer-dependencies=false",
+                "--config.strict-dep-builds=false",
+            ]
+        if package_manager_name == "npm":
+            return ["install", "--omit=dev", "--legacy-peer-deps"]
+        return ["install"]
 
     async def _run_command(
         self,
@@ -1079,8 +1114,8 @@ class DefaultPackageManager:
         target_dir = self._get_git_install_path(source, scope)
         if os.path.exists(target_dir):
             return
-        git_root = self._get_git_install_root(scope)
-        self._ensure_git_ignore(git_root)
+        if scope != "temporary":
+            self._ensure_git_ignore(self._get_git_install_root(scope))
         os.makedirs(os.path.dirname(target_dir), exist_ok=True)
         await self._run_command(
             "git", ["clone", source.repo, target_dir], timeout_ms=NETWORK_TIMEOUT_MS
@@ -1101,7 +1136,13 @@ class DefaultPackageManager:
         if not os.path.exists(target_dir):
             return
         shutil.rmtree(target_dir)
-        self._prune_empty_git_parents(target_dir, self._get_git_install_root(scope))
+        if scope == "temporary":
+            install_root = self._resolve_managed_path(
+                get_extension_temp_folder(self._agent_dir), f"git-{source.host}"
+            )
+        else:
+            install_root = self._get_git_install_root(scope)
+        self._prune_empty_git_parents(target_dir, install_root)
 
     def _prune_empty_git_parents(self, target_dir: str, install_root: str) -> None:
         resolved_root = os.path.realpath(install_root)

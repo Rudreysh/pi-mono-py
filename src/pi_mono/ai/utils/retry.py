@@ -14,14 +14,16 @@ from pi_mono.ai.types import AssistantMessage
 
 _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = re.compile(
     r"GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|"
-    r"insufficient_quota|out of budget|quota exceeded|billing",
+    r"insufficient_quota|out of budget|quota exceeded|billing|"
+    r"subscription_sharing_usage_limit_exceeded",
     re.IGNORECASE,
 )
 
 _RETRYABLE_PROVIDER_ERROR_PATTERN = re.compile(
-    r"overloaded|rate.?limit|too many requests|429|500|502|503|504|524|"
+    r"overloaded|currently experiencing high demand|model is at capacity|"
+    r"rate.?limit|too many requests|429|500|502|503|504|520|524|"
     r"service.?unavailable|server.?error|internal.?error|"
-    r"provider.?returned.?error|"
+    r"provider.?returned.?error|exceeded request buffer limit while retrying upstream|"
     r"network.?error|connection.?error|connection.?refused|connection.?lost|"
     r"other side closed|fetch failed|"
     r"getaddrinfo|ENOTFOUND|EAI_AGAIN|"
@@ -33,7 +35,8 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = re.compile(
     r"http2 request did not get a response|"
     r"retry delay|"
     r"you can retry your request|try your request again|please retry your request|"
-    r"ResourceExhausted",
+    r"ResourceExhausted|"
+    r"subscription_sharing_usage_unavailable|subscription_sharing_user_unavailable",
     re.IGNORECASE,
 )
 

@@ -153,11 +153,11 @@ class TestEvalsStub:
         assert harness.cases[0].name == "c1"
 
     @pytest.mark.anyio
-    async def test_eval_harness_run_raises(self) -> None:
+    async def test_eval_harness_run_requires_complete(self) -> None:
         from pi_mono.evals import EvalHarness
 
         harness = EvalHarness()
-        with pytest.raises(NotImplementedError, match="placeholder"):
+        with pytest.raises(ValueError, match="complete callback"):
             await harness.run()
 
 

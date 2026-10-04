@@ -38,6 +38,7 @@ class Input(Component):
         self._cursor: int = 0
         self.on_submit: Optional[Callable[[str], None]] = None
         self.on_escape: Optional[Callable[[], None]] = None
+        self.on_paste: Optional[Callable[[str], None]] = None
         self.focused: bool = False
 
         # Bracketed paste mode buffering
@@ -93,7 +94,7 @@ class Input(Component):
             # Check if this chunk contains the end marker
             self._paste_buffer += data
 
-            end_index = self._paste_buffer.index("\x1b[201~")
+            end_index = self._paste_buffer.find("\x1b[201~")
             if end_index != -1:
                 # Extract the pasted content
                 paste_content = self._paste_buffer[:end_index]
@@ -368,6 +369,8 @@ class Input(Component):
         # Insert at cursor position
         self._value = self._value[: self._cursor] + clean_text + self._value[self._cursor :]
         self._cursor += len(clean_text)
+        if self.on_paste:
+            self.on_paste(clean_text)
 
     def invalidate(self) -> None:
         # No cached state to invalidate currently

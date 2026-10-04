@@ -155,6 +155,7 @@ async def test_prompt_preflight_success_emits_one_success_response(tmp_path, mon
     responses = _prompt_responses(output_lines, "b2")
     assert len(responses) == 1
     assert responses[0]["success"] is True
+    assert responses[0]["data"] == {"disposition": "started"}
 
 
 @pytest.mark.anyio
@@ -183,6 +184,7 @@ async def test_prompt_preflight_success_before_agent_run_completes(tmp_path, mon
 
     assert len(_prompt_responses(output_lines, "b2b")) == 1
     assert _prompt_responses(output_lines, "b2b")[0]["success"] is True
+    assert _prompt_responses(output_lines, "b2b")[0]["data"] == {"disposition": "started"}
     assert runtime.session.is_streaming is False
     release_run.set()
 
@@ -202,10 +204,10 @@ async def test_prompt_queued_during_streaming_emits_immediate_success(
     release_first_run = asyncio.Event()
 
     async def holding_run(messages: Any) -> None:
-        runtime.session.agent.state._is_streaming = True
+        runtime.session._is_agent_run_active = True
         hold_first_run.set()
         await release_first_run.wait()
-        runtime.session.agent.state._is_streaming = False
+        runtime.session._is_agent_run_active = False
 
     runtime.session._run_agent_prompt = holding_run  # type: ignore[method-assign]
 
@@ -239,9 +241,57 @@ async def test_prompt_queued_during_streaming_emits_immediate_success(
     responses = _prompt_responses(output_lines, "b3")
     assert len(responses) == 1
     assert responses[0]["success"] is True
+    assert responses[0]["data"] == {"disposition": "queued"}
 
     release_first_run.set()
-    await runtime.session.abort()
+    for _ in range(50):
+        if not runtime.session.is_streaming:
+            break
+        await asyncio.sleep(0.01)
+    assert runtime.session.is_streaming is False
+
+
+@pytest.mark.anyio
+async def test_prompt_handled_by_extension_reports_handled_disposition(tmp_path, monkeypatch) -> None:
+    mode, runtime = await _make_rpc_mode_with_faux(tmp_path, with_configured_auth=True)
+    output_lines: list[str] = []
+    monkeypatch.setattr(
+        "pi_mono.coding_agent.modes.rpc.rpc_mode.write_raw_stdout",
+        lambda line: output_lines.append(line),
+    )
+
+    async def handle_command(_text: str) -> bool:
+        return True
+
+    runtime.session.try_execute_extension_command = handle_command  # type: ignore[method-assign]
+    await mode.handle_command(
+        parse_rpc_command(json.dumps({"id": "handled", "type": "prompt", "message": "/status"}))
+    )
+    for _ in range(50):
+        if _prompt_responses(output_lines, "handled"):
+            break
+        await asyncio.sleep(0.01)
+
+    responses = _prompt_responses(output_lines, "handled")
+    assert len(responses) == 1
+    assert responses[0]["data"] == {"disposition": "handled"}
+
+
+@pytest.mark.anyio
+async def test_queued_rpc_commands_report_queue_disposition(tmp_path) -> None:
+    mode, _runtime = await _make_rpc_mode_with_faux(tmp_path, with_configured_auth=True)
+
+    steer = await mode.handle_command(
+        parse_rpc_command(json.dumps({"id": "steer", "type": "steer", "message": "Stop"}))
+    )
+    follow_up = await mode.handle_command(
+        parse_rpc_command(
+            json.dumps({"id": "follow", "type": "follow_up", "message": "Continue"})
+        )
+    )
+
+    assert steer is not None and steer["data"] == {"disposition": "queued"}
+    assert follow_up is not None and follow_up["data"] == {"disposition": "queued"}
 
 
 @pytest.mark.anyio

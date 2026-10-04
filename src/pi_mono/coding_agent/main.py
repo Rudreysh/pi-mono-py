@@ -53,12 +53,13 @@ def _is_truthy_env_flag(value: str | None) -> bool:
     return value.lower() in ("1", "true", "yes")
 
 
-def _resolve_app_mode(parsed: Args, stdin_is_tty: bool) -> str:
+def _resolve_app_mode(parsed: Args, stdin_is_tty: bool, stdout_is_tty: bool | None = None) -> str:
     if parsed.mode == "rpc":
         return "rpc"
     if parsed.mode == "json":
         return "json"
-    if parsed.print_mode or not stdin_is_tty:
+    stdout_tty = sys.stdout.isatty() if stdout_is_tty is None else stdout_is_tty
+    if parsed.print_mode or not stdin_is_tty or not stdout_tty:
         return "print"
     return "interactive"
 
@@ -85,13 +86,28 @@ async def _read_piped_stdin() -> str | None:
     try:
         import select
 
+        fd = sys.stdin.fileno()
         ready, _, _ = select.select([sys.stdin], [], [], 0)
         if not ready:
             return None
-    except (ImportError, ValueError, OSError):
+    except (ImportError, ValueError, OSError, AttributeError):
         return None
-    data = sys.stdin.read()
-    stripped = data.strip()
+    chunks: list[bytes] = []
+    while True:
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+        except (ValueError, OSError):
+            break
+        if not ready:
+            break
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        chunks.append(data)
+    stripped = b"".join(chunks).decode("utf-8", errors="replace").strip()
     return stripped if stripped else None
 
 
@@ -349,6 +365,13 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str, app_mode: str)
     thinking_level = parsed.thinking
     scoped_models = resolve_model_scope(parsed.models, model_registry) if parsed.models else []
 
+    if parsed.provider and not parsed.model and parsed.provider.lower() != "faux":
+        print(
+            f"Error: --provider requires --model (for example: --provider {parsed.provider} --model <pattern>)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     if parsed.provider and parsed.provider.lower() == "faux":
         from pi_mono.ai.providers.faux import (
             DEFAULT_MODEL_ID,
@@ -392,6 +415,10 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str, app_mode: str)
     project_trusted = _resolve_project_trusted_for_runtime(parsed, cwd, agent_dir, app_mode)
     settings_manager = SettingsManager.create(cwd, agent_dir, project_trusted=project_trusted)
     apply_http_proxy_settings(settings_manager.get_http_proxy())
+    if app_mode == "interactive" and parsed.use_theme:
+        settings_manager.apply_overrides({"theme": parsed.use_theme})
+    if app_mode == "interactive" and parsed.tui_mode:
+        settings_manager.apply_overrides({"tuiMode": parsed.tui_mode})
 
     runtime = await create_agent_session_runtime(
         cwd=cwd,
@@ -432,6 +459,13 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
         if handled:
             return
 
+    from pi_mono.coding_agent.cli.auth_command import run_auth_command
+
+    if argv and argv[0] == "auth":
+        handled = await run_auth_command(argv)
+        if handled:
+            return
+
     offline_mode = "--offline" in argv or _is_truthy_env_flag(os.environ.get("PI_OFFLINE"))
     if offline_mode:
         os.environ["PI_OFFLINE"] = "1"
@@ -446,7 +480,7 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
         if any(item["type"] == "error" for item in parsed.diagnostics):
             raise SystemExit(1)
 
-    app_mode = _resolve_app_mode(parsed, sys.stdin.isatty())
+    app_mode = _resolve_app_mode(parsed, sys.stdin.isatty(), sys.stdout.isatty())
     should_take_over_stdout = app_mode != "interactive"
     if should_take_over_stdout:
         take_over_stdout()
@@ -514,6 +548,8 @@ async def main(args: list[str] | None = None, options: MainOptions | None = None
                     initial_images=initial_images,
                     initial_messages=follow_up_messages or None,
                     verbose=parsed.verbose,
+                    theme_name=parsed.use_theme or runtime.session.settings_manager.get_theme() or "dark",
+                    tui_mode=parsed.tui_mode,
                 ),
             )
             return

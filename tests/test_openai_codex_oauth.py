@@ -7,11 +7,24 @@ import pytest
 
 from pi_mono.ai.utils.oauth.openai_codex import (
     _OAuthServerInfo,
+    _parse_authorization_input,
     login_openai_codex,
     login_openai_codex_device_code,
     openai_codex_oauth_provider,
     refresh_openai_codex_token,
 )
+
+
+def test_parse_authorization_input_from_localhost_callback():
+    parsed = _parse_authorization_input(
+        "http://localhost:1455/auth/callback?code=ac_rIDUeTqCAzYHML0bXSOiv0wraCAfUcB2QDWuS8h1ZRY."
+        "LqlRTDkH0_xNA7BUIEN7rEANLTDZYufVByGR0mzW41s&scope=openid+profile+email+offline_access"
+        "&state=7fe4515b9e2d8d04ca0ce02dc6160443"
+    )
+    assert parsed["code"] == (
+        "ac_rIDUeTqCAzYHML0bXSOiv0wraCAfUcB2QDWuS8h1ZRY.LqlRTDkH0_xNA7BUIEN7rEANLTDZYufVByGR0mzW41s"
+    )
+    assert parsed["state"] == "7fe4515b9e2d8d04ca0ce02dc6160443"
 
 
 def _create_access_token(account_id: str) -> str:
@@ -293,6 +306,68 @@ async def test_retry_prompt_after_failed_exchange():
         )
 
     assert credentials["accountId"] == "account-retry"
+
+
+@pytest.mark.anyio
+async def test_pasted_localhost_callback_url_completes_login():
+    access_token = _create_access_token("account-paste")
+    state = "7fe4515b9e2d8d04ca0ce02dc6160443"
+    callback_url = (
+        "http://localhost:1455/auth/callback?code=pasted-code"
+        f"&scope=openid+profile+email+offline_access&state={state}"
+    )
+
+    async def fake_start_server(_received_state: str) -> _OAuthServerInfo:
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future[dict[str, str] | None] = loop.create_future()
+        result_future.set_result(None)
+        return _OAuthServerInfo(
+            server=None,
+            cancel_wait=lambda: None,
+            wait_for_code=lambda: result_future,
+        )
+
+    async def fake_exchange(code: str, verifier: str, redirect_uri: str, signal=None):
+        assert code == "pasted-code"
+        return {
+            "access": access_token,
+            "refresh": "refresh-token",
+            "expires": 1_700_000_000_000,
+            "accountId": "account-paste",
+        }
+
+    async def paste_url() -> str:
+        return callback_url
+
+    async def fail_prompt(_: object) -> str:
+        pytest.fail("prompt should not be used")
+
+    with (
+        mock.patch(
+            "pi_mono.ai.utils.oauth.openai_codex._create_authorization_flow",
+            new_callable=mock.AsyncMock,
+            return_value={
+                "verifier": "verifier",
+                "state": state,
+                "url": "https://auth.openai.com/oauth/authorize",
+            },
+        ),
+        mock.patch(
+            "pi_mono.ai.utils.oauth.openai_codex._start_local_oauth_server",
+            side_effect=fake_start_server,
+        ),
+        mock.patch(
+            "pi_mono.ai.utils.oauth.openai_codex._exchange_authorization_code_for_credentials",
+            side_effect=fake_exchange,
+        ),
+    ):
+        credentials = await login_openai_codex(
+            on_auth=lambda _: None,
+            on_prompt=fail_prompt,
+            on_manual_code_input=paste_url,
+        )
+
+    assert credentials["accountId"] == "account-paste"
 
 
 @pytest.mark.anyio

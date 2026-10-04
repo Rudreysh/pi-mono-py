@@ -28,3 +28,12 @@ def test_headers_to_record_iterable():
     headers_list = [("Content-Type", "text/plain"), ("X-Test", "123")]
     res = headers_to_record(headers_list)
     assert res == {"Content-Type": "text/plain", "X-Test": "123"}
+
+
+def test_headers_to_record_httpx_headers():
+    import httpx
+
+    headers = httpx.Headers({"content-type": "text/event-stream", "date": "Thu, 10 Sep 2026"})
+    res = headers_to_record(headers)
+    assert res["content-type"] == "text/event-stream"
+    assert "date" in res

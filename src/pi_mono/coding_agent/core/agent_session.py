@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import shutil
@@ -73,6 +74,7 @@ from pi_mono.coding_agent.core.tools import ALL_TOOL_NAMES, ToolName, create_too
 from pi_mono.config import get_agent_dir
 from pi_mono.utils.paths import resolve_path  # used by AgentSessionRuntime
 from pi_mono.utils.abort_signals import AbortController, AbortSignal
+from pi_mono.utils.image_process import ProcessImageOptions, process_image
 
 CompactionReason = Literal["manual", "overflow", "threshold"]
 
@@ -87,6 +89,8 @@ _STALE_EXTENSION_CTX_MESSAGE = (
 
 SteeringMode = Literal["all", "one-at-a-time"]
 FollowUpMode = Literal["all", "one-at-a-time"]
+QueuedInputDisposition = Literal["handled", "queued"]
+PromptDisposition = QueuedInputDisposition | Literal["started"]
 
 
 class ModelCycleResult(TypedDict):
@@ -110,6 +114,7 @@ class SessionStats(TypedDict, total=False):
 _DEFAULT_TOOL_SNIPPETS: dict[str, str] = {
     "read": "Read file contents",
     "bash": "Execute shell commands",
+    "powershell": "Execute PowerShell commands",
     "edit": "Edit files with search/replace",
     "write": "Write or overwrite files",
     "grep": "Search file contents",
@@ -246,7 +251,7 @@ class PromptOptions:
     images: list[ImageContent] | None = None
     streaming_behavior: Literal["steer", "followUp"] | None = None
     source: Literal["interactive", "rpc", "extension"] = "interactive"
-    preflight_result: Callable[[bool], None] | None = None
+    preflight_result: Callable[[PromptDisposition], None] | None = None
 
 
 @dataclass
@@ -328,6 +333,7 @@ class AgentSession:
         self._extension_runner_ref = config.extension_runner_ref
         self._turn_index = 0
         self._pending_next_turn_messages: list[AgentMessage] = []
+        self._pending_custom_messages: list[AgentMessage] = []
         self._extension_shutdown_handler: Callable[[], None] | None = None
         self._extension_abort_handler: Callable[[], None] | None = None
         self._agent_tool_hooks_installed = False
@@ -488,6 +494,29 @@ class AgentSession:
         finally:
             self._resolve_idle_wait_if_idle()
 
+    async def _emit_session_compact_failed(
+        self,
+        *,
+        reason: str,
+        error_message: str | None,
+        aborted: bool,
+        will_retry: bool,
+        from_extension: bool,
+    ) -> None:
+        runner = self._extension_runner
+        if runner is None or not runner.has_handlers("session_compact_failed"):
+            return
+        await runner.emit(
+            {
+                "type": "session_compact_failed",
+                "reason": reason,
+                "errorMessage": error_message,
+                "aborted": aborted,
+                "willRetry": will_retry,
+                "fromExtension": from_extension,
+            }
+        )
+
     async def _handle_agent_event_with_signal(self, event: AgentEvent, _signal: AbortSignal) -> None:
         await self._handle_agent_event_async(event)
 
@@ -538,6 +567,9 @@ class AgentSession:
                         }
                     )
                     self._retry_attempt = 0
+
+        if event_type == "turn_end":
+            self._flush_pending_custom_messages()
 
     async def _apply_extension_event_hooks(self, event: AgentEvent) -> AgentEvent:
         runner = self._extension_runner
@@ -604,15 +636,20 @@ class AgentSession:
     def prompt_templates(self) -> list[Any]:
         return self._resource_loader.get_prompts().get("prompts", [])
 
-    def set_thinking_level(self, level: ThinkingLevel) -> None:
-        effective_level = (
-            clamp_thinking_level(self.model, level) if self.model else "off"  # type: ignore[assignment]
-        )
+    def set_thinking_level(self, level: ThinkingLevel, persist: bool = False) -> None:
+        available_levels = self.get_available_thinking_levels()
+        if level in available_levels:
+            effective_level = level
+        else:
+            effective_level = (
+                clamp_thinking_level(self.model, level) if self.model else "off"  # type: ignore[assignment]
+            )
         previous_level = self.agent.state.thinkingLevel
         self.agent.state.thinkingLevel = effective_level
+        if persist:
+            self.settings_manager.set_default_thinking_level(level)
         if effective_level != previous_level:
             self.session_manager.append_thinking_level_change(effective_level)
-            self.settings_manager.set_default_thinking_level(effective_level)
             self._emit({"type": "thinking_level_changed", "level": effective_level})
             runner = self._extension_runner
             if runner is not None:
@@ -955,22 +992,70 @@ class AgentSession:
         await self._get_idle_wait_future()
 
     async def abort(self) -> None:
+        self.abort_retry()
+        self.abort_compaction()
+        if self._branch_summary_abort_controller is not None:
+            self._branch_summary_abort_controller.abort()
         self.agent.abort()
         await self.wait_for_idle()
 
-    async def steer(self, text: str, images: list[ImageContent] | None = None) -> None:
-        if text.startswith("/"):
-            self._throw_if_extension_command(text)
-        expanded_text = self._expand_skill_command(text)
-        expanded_text = expand_prompt_template(expanded_text, self.prompt_templates)
-        await self._queue_steer(expanded_text, images)
+    def abort_compaction(self) -> None:
+        if self._compaction_abort_controller is not None:
+            self._compaction_abort_controller.abort()
+        if self._auto_compaction_abort_controller is not None:
+            self._auto_compaction_abort_controller.abort()
 
-    async def follow_up(self, text: str, images: list[ImageContent] | None = None) -> None:
+    async def _queue_user_input(
+        self,
+        text: str,
+        images: list[ImageContent] | None,
+        behavior: Literal["steer", "followUp"],
+        source: Literal["interactive", "rpc", "extension"],
+    ) -> QueuedInputDisposition:
         if text.startswith("/"):
             self._throw_if_extension_command(text)
-        expanded_text = self._expand_skill_command(text)
+
+        current_text = text
+        current_images = images
+        runner = self._extension_runner
+        if runner is not None and runner.has_handlers("input"):
+            input_result = await runner.emit_input(
+                current_text,
+                current_images,
+                source,
+                behavior if self.is_streaming else None,
+            )
+            if input_result.get("action") == "handled":
+                return "handled"
+            if input_result.get("action") == "transform":
+                current_text = input_result.get("text", current_text)
+                current_images = input_result.get("images", current_images)
+
+        expanded_text = self._expand_skill_command(current_text)
         expanded_text = expand_prompt_template(expanded_text, self.prompt_templates)
-        await self._queue_follow_up(expanded_text, images)
+        if behavior == "steer":
+            await self._queue_steer(expanded_text, current_images)
+        else:
+            await self._queue_follow_up(expanded_text, current_images)
+        return "queued"
+
+    async def steer(
+        self,
+        text: str,
+        images: list[ImageContent] | None = None,
+        *,
+        source: Literal["interactive", "rpc", "extension"] = "interactive",
+    ) -> QueuedInputDisposition:
+        return await self._queue_user_input(text, images, "steer", source)
+
+    async def follow_up(
+        self,
+        text: str,
+        images: list[ImageContent] | None = None,
+        *,
+        source: Literal["interactive", "rpc", "extension"] = "interactive",
+    ) -> QueuedInputDisposition:
+        return await self._queue_user_input(text, images, "followUp", source)
 
     async def _queue_steer(
         self, text: str, images: list[ImageContent] | None = None
@@ -1157,6 +1242,7 @@ class AgentSession:
         aborted = False
         error_message: str | None = None
         compaction_result: dict[str, Any] | None = None
+        from_extension = False
 
         try:
             if not self.model:
@@ -1185,7 +1271,6 @@ class AgentSession:
                 raise RuntimeError("Compaction cancelled")
 
             extension_compaction: dict[str, Any] | None = None
-            from_extension = False
             runner = self._extension_runner
             if runner is not None and runner.has_handlers("session_before_compact"):
                 before_result = await runner.emit(
@@ -1272,6 +1357,15 @@ class AgentSession:
             error_message = str(error)
             if "cancelled" in error_message.lower():
                 aborted = True
+            compact_error_message = None if aborted else f"Compaction failed: {error_message}"
+            error_message = compact_error_message
+            await self._emit_session_compact_failed(
+                reason="manual",
+                error_message=error_message,
+                aborted=aborted,
+                will_retry=False,
+                from_extension=from_extension,
+            )
             raise
         finally:
             self._emit(
@@ -1566,7 +1660,7 @@ class AgentSession:
         if deliver_as == "nextTurn":
             self._pending_next_turn_messages.append(app_message)
             return
-        if self.is_streaming:
+        if self.is_streaming and opts.get("triggerTurn") is not False:
             if deliver_as == "followUp":
                 self.agent.followUp(app_message)
             else:
@@ -1575,15 +1669,29 @@ class AgentSession:
         if opts.get("triggerTurn"):
             await self._run_agent_prompt(app_message)
             return
+        if self.is_streaming:
+            self._pending_custom_messages.append(app_message)
+            return
+        self._append_custom_message(app_message)
+
+    def _append_custom_message(self, app_message: AgentMessage) -> None:
         self.agent.state.messages.append(app_message)
         self.session_manager.append_custom_message_entry(
-            str(message["customType"]),
-            message["content"],
-            bool(message.get("display", True)),
-            message.get("details"),
+            str(app_message.get("customType")),
+            app_message.get("content"),
+            bool(app_message.get("display", True)),
+            app_message.get("details"),
         )
         self._emit({"type": "message_start", "message": app_message})
         self._emit({"type": "message_end", "message": app_message})
+
+    def _flush_pending_custom_messages(self) -> None:
+        if not self._pending_custom_messages:
+            return
+        pending = self._pending_custom_messages
+        self._pending_custom_messages = []
+        for app_message in pending:
+            self._append_custom_message(app_message)
 
     async def send_user_message(
         self,
@@ -1610,7 +1718,7 @@ class AgentSession:
         await self.prompt(
             text,
             PromptOptions(
-                expand_templates=False,
+                expand_templates=bool(opts.get("expandPromptTemplates", False)),
                 images=images,
                 streaming_behavior=opts.get("deliverAs"),
                 source="extension",
@@ -2007,6 +2115,15 @@ class AgentSession:
             error_message = str(error)
             if "cancelled" in error_message.lower():
                 aborted = True
+            compact_error_message = None if aborted else f"Compaction failed: {error_message}"
+            error_message = compact_error_message
+            await self._emit_session_compact_failed(
+                reason=reason,
+                error_message=error_message,
+                aborted=aborted,
+                will_retry=will_retry,
+                from_extension=False,
+            )
             return False
         finally:
             self._emit(
@@ -2051,6 +2168,7 @@ class AgentSession:
             while await self._handle_post_agent_run():
                 await self.agent.continue_run()
         finally:
+            self._flush_pending_custom_messages()
             await self._emit_agent_settled()
 
     async def prompt(self, text: str, options: PromptOptions | None = None) -> None:
@@ -2061,7 +2179,7 @@ class AgentSession:
         try:
             if opts.expand_templates and text.startswith("/"):
                 if await self.try_execute_extension_command(text):
-                    preflight_result and preflight_result(True)
+                    preflight_result and preflight_result("handled")
                     return
 
             current_text = text
@@ -2075,7 +2193,7 @@ class AgentSession:
                     opts.streaming_behavior if self.is_streaming else None,
                 )
                 if input_result.get("action") == "handled":
-                    preflight_result and preflight_result(True)
+                    preflight_result and preflight_result("handled")
                     return
                 if input_result.get("action") == "transform":
                     current_text = input_result.get("text", current_text)
@@ -2088,11 +2206,19 @@ class AgentSession:
                 if expanded_text.startswith("/") and await self.try_execute_extension_command(
                     expanded_text
                 ):
-                    preflight_result and preflight_result(True)
+                    preflight_result and preflight_result("handled")
                     return
 
             if not self.model or self.model.get("id") in (None, "unknown"):
                 raise RuntimeError(format_no_model_selected_message())
+
+            image_limits = (self.model.get("inputLimits") or {}).get("images") or {}
+            max_per_message = image_limits.get("maxPerMessage")
+            if isinstance(max_per_message, int) and current_images and len(current_images) > max_per_message:
+                raise RuntimeError(
+                    f"Model accepts at most {max_per_message} images per message; "
+                    f"received {len(current_images)}."
+                )
 
             if self.is_streaming:
                 if not opts.streaming_behavior:
@@ -2104,8 +2230,10 @@ class AgentSession:
                     await self._queue_follow_up(expanded_text, current_images)
                 else:
                     await self._queue_steer(expanded_text, current_images)
-                preflight_result and preflight_result(True)
+                preflight_result and preflight_result("queued")
                 return
+
+            self._flush_pending_custom_messages()
 
             if not self.model_registry.has_configured_auth(self.model):
                 provider = self.model.get("provider", "unknown")
@@ -2125,9 +2253,45 @@ class AgentSession:
                 # Do not continue the agent here (matches TS).
                 pass
 
+            normalized_images: list[ImageContent] = []
+            image_hints: list[str] = []
+            resize = ((self.model.get("inputLimits") or {}).get("images") or {}).get("resize")
+            resize_options = (
+                {
+                    "max_width": resize.get("maxWidth"),
+                    "max_height": resize.get("maxHeight"),
+                    "max_bytes": resize.get("maxBytes"),
+                    "jpeg_quality": resize.get("jpegQuality"),
+                }
+                if resize
+                else None
+            )
+            if resize_options is not None:
+                resize_options = {
+                    key: value for key, value in resize_options.items() if value is not None
+                } or None
+            for image in current_images or []:
+                processed = process_image(
+                    base64.b64decode(image["data"]),
+                    image["mimeType"],
+                    ProcessImageOptions(
+                        auto_resize_images=self.settings_manager.get_image_auto_resize(),
+                        resize_options=resize_options,
+                    ),
+                )
+                if processed.ok:
+                    normalized_images.append(
+                        {"type": "image", "data": processed.data, "mimeType": processed.mime_type}
+                    )
+                    image_hints.extend(processed.hints or [])
+                else:
+                    image_hints.append(processed.message)
+
+            if image_hints:
+                expanded_text = f"{expanded_text}\n\n{'\n'.join(image_hints)}"
+
             user_content: list[Any] = [{"type": "text", "text": expanded_text}]
-            if current_images:
-                user_content.extend(current_images)
+            user_content.extend(normalized_images)
             messages = [
                 {
                     "role": "user",
@@ -2169,15 +2333,13 @@ class AgentSession:
             else:
                 self.agent.state.systemPrompt = self._base_system_prompt
         except Exception:
-            if preflight_result is not None:
-                preflight_result(False)
+            # Rejections are surfaced by the RPC task without an acceptance disposition.
             raise
-
         if messages is None:
             return
 
         if preflight_result is not None:
-            preflight_result(True)
+            preflight_result("started")
         await self._run_agent_prompt(messages)
 
     @property
@@ -2744,11 +2906,18 @@ class AgentSessionRuntime:
             os.makedirs(session_dir, exist_ok=True)
 
         destination_path = os.path.join(session_dir or "", os.path.basename(resolved_path))
+        source_already_stored = os.path.abspath(destination_path) == os.path.abspath(resolved_path)
+        if not source_already_stored:
+            name, ext = os.path.splitext(os.path.basename(destination_path))
+            suffix = 1
+            while os.path.exists(destination_path):
+                destination_path = os.path.join(session_dir or "", f"{name}-{suffix}{ext}")
+                suffix += 1
         if await self._emit_before_switch("resume", destination_path):
             return {"cancelled": True}
 
         previous_session_file = self.session.session_file
-        if os.path.abspath(destination_path) != os.path.abspath(resolved_path):
+        if not source_already_stored:
             shutil.copy2(resolved_path, destination_path)
         else:
             destination_path = resolved_path

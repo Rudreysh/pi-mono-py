@@ -18,6 +18,7 @@ from pi_mono.agent.harness.compaction.compaction import (
     prepare_compaction,
     compact,
     generate_summary,
+    generate_turn_prefix_summary,
     DEFAULT_COMPACTION_SETTINGS,
 )
 from pi_mono.agent.harness.session.session import build_session_context
@@ -672,6 +673,27 @@ async def test_passes_reasoning_through_turn_prefix_summaries_when_enabled(clean
 
     comp_res = await compact(preparation, model, "test-key", thinking_level="high")
     assert comp_res.ok is True
+
+
+@pytest.mark.anyio
+async def test_turn_prefix_summary_uses_explicit_conversation_and_instruction_sections(cleanup_faux):
+    captured_prompt = ""
+    faux, model = create_faux_model(cleanup_faux, reasoning=False)
+
+    async def mock_response(context, _options, _state, _req_model):
+        nonlocal captured_prompt
+        captured_prompt = context["messages"][0]["content"][0]["text"]
+        return faux_assistant_message("## Original Request\nTest summary")
+
+    faux.set_responses([mock_response])
+    result = await generate_turn_prefix_summary(
+        [create_user_message("Summarize this.")], model, 2000, "test-key"
+    )
+
+    assert result.ok is True
+    assert "# Conversation\n[User]: Summarize this." in captured_prompt
+    assert "# Instructions\nThe messages above are earlier context from an ongoing conversation." in captured_prompt
+    assert "<conversation>" not in captured_prompt
 
 
 @pytest.mark.anyio

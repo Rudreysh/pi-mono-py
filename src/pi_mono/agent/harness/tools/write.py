@@ -58,7 +58,7 @@ def create_write_tool() -> Any:
                 if signal is not None and getattr(signal, "aborted", False):
                     raise RuntimeError("Operation aborted")
                 return {
-                    "content": [{"type": "text", "text": f"Successfully wrote {len(content)} bytes to {path}"}],
+                    "content": [{"type": "text", "text": f"Successfully wrote to {path}"}],
                     "details": None,
                 }
 

@@ -44,6 +44,10 @@ def _fake_rpc_server_script() -> str:
                 response["data"] = {"cancelled": False}
             elif command_type == "get_fork_messages":
                 response["data"] = {"messages": [{"entryId": "u1", "text": "hello"}]}
+            elif command_type == "prompt":
+                response["data"] = {"disposition": "started"}
+            elif command_type in ("steer", "follow_up"):
+                response["data"] = {"disposition": "queued"}
             else:
                 response["data"] = {}
             sys.stdout.write(json.dumps(response) + "\\n")
@@ -129,12 +133,14 @@ async def test_rpc_client_collects_agent_events(tmp_path: Path) -> None:
                     sys.stdout.flush()
                     sys.stdout.write(json.dumps({"type": "agent_end", "messages": []}) + "\\n")
                     sys.stdout.flush()
+                    sys.stdout.write(json.dumps({"type": "agent_settled"}) + "\\n")
+                    sys.stdout.flush()
                     response = {
                         "type": "response",
                         "id": command.get("id"),
                         "success": True,
                         "command": "prompt",
-                        "data": {},
+                        "data": {"disposition": "started"},
                     }
                     sys.stdout.write(json.dumps(response) + "\\n")
                     sys.stdout.flush()
@@ -152,9 +158,25 @@ async def test_rpc_client_collects_agent_events(tmp_path: Path) -> None:
     try:
         await client.start()
         collect_task = asyncio.create_task(client.collect_events(timeout=2))
-        await client.prompt("hello")
+        assert await client.prompt("hello") == "started"
         events = await collect_task
-        assert [event["type"] for event in events] == ["agent_start", "agent_end"]
+        assert [event["type"] for event in events] == ["agent_start", "agent_end", "agent_settled"]
+    finally:
+        await client.stop()
+
+
+@pytest.mark.anyio
+async def test_rpc_client_returns_prompt_and_queue_dispositions(tmp_path: Path) -> None:
+    script = tmp_path / "fake_rpc.py"
+    script.write_text(_fake_rpc_server_script(), encoding="utf-8")
+    client = RpcClient(
+        RpcClientOptions(command=[sys.executable, str(script)], cwd=str(tmp_path), startup_delay_ms=0)
+    )
+    try:
+        await client.start()
+        assert await client.prompt("hello", streaming_behavior="followUp") == "started"
+        assert await client.steer("stop") == "queued"
+        assert await client.follow_up("continue") == "queued"
     finally:
         await client.stop()
 

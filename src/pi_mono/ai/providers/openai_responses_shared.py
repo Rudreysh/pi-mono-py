@@ -15,6 +15,7 @@ from pi_mono.ai.types import (
     Tool,
     ToolCall,
 )
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.utils.event_stream import AssistantMessageEventStream
 from pi_mono.ai.utils.hash import short_hash
 from pi_mono.ai.utils.json_parse import parse_streaming_json
@@ -48,10 +49,12 @@ def parse_text_signature(signature: str | None) -> dict[str, str] | None:
 class OpenAIResponsesStreamOptions:
     def __init__(
         self,
+        on_provider_stream_event: Any = None,
         service_tier: str | None = None,
         resolve_service_tier: Any = None,
         apply_service_tier_pricing: Any = None,
     ):
+        self.on_provider_stream_event = on_provider_stream_event
         self.service_tier = service_tier
         self.resolve_service_tier = resolve_service_tier
         self.apply_service_tier_pricing = apply_service_tier_pricing
@@ -298,6 +301,19 @@ async def process_responses_stream(
         return len(blocks) - 1
 
     async for event in openai_stream:
+        await emit_provider_stream_event(
+            {
+                "onProviderStreamEvent": (
+                    options.get("on_provider_stream_event")
+                    if isinstance(options, dict)
+                    else options.on_provider_stream_event
+                )
+            }
+            if options
+            else None,
+            event,
+            model,
+        )
         event_type = event.get("type")
 
         if event_type == "response.created":

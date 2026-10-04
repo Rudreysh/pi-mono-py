@@ -215,6 +215,8 @@ ModelDefinitionSchema = {
         "baseUrl": {"type": "string", "minLength": 1},
         "reasoning": {"type": "boolean"},
         "thinkingLevelMap": ThinkingLevelMapSchema,
+        "samplingParams": {"type": "object"},
+        "samplingParamsByThinkingLevel": {"type": "object"},
         "input": {"type": "array", "items": {"type": "string", "enum": ["text", "image"]}},
         "cost": ModelCostSchema,
         "contextWindow": {"type": "number"},
@@ -230,6 +232,8 @@ ModelOverrideSchema = {
         "name": {"type": "string", "minLength": 1},
         "reasoning": {"type": "boolean"},
         "thinkingLevelMap": ThinkingLevelMapSchema,
+        "samplingParams": {"type": "object"},
+        "samplingParamsByThinkingLevel": {"type": "object"},
         "input": {"type": "array", "items": {"type": "string", "enum": ["text", "image"]}},
         "cost": ModelCostOverrideSchema,
         "contextWindow": {"type": "number"},
@@ -393,6 +397,16 @@ def apply_model_override(model: Model, override: dict[str, Any]) -> Model:
             **result.get("thinkingLevelMap", {}),
             **override["thinkingLevelMap"],
         }
+    if override.get("samplingParams") is not None:
+        result["samplingParams"] = {
+            **(result.get("samplingParams") or {}),
+            **override["samplingParams"],
+        }
+    if override.get("samplingParamsByThinkingLevel") is not None:
+        merged_by_level = dict(result.get("samplingParamsByThinkingLevel") or {})
+        for level, params in override["samplingParamsByThinkingLevel"].items():
+            merged_by_level[level] = {**(merged_by_level.get(level) or {}), **(params or {})}
+        result["samplingParamsByThinkingLevel"] = merged_by_level
     if override.get("input") is not None:
         result["input"] = override["input"]
     if override.get("contextWindow") is not None:
@@ -710,6 +724,10 @@ class ModelRegistry:
                         "baseUrl": base_url,
                         "reasoning": model_def.get("reasoning", False),
                         "thinkingLevelMap": model_def.get("thinkingLevelMap"),
+                        "samplingParams": model_def.get("samplingParams"),
+                        "samplingParamsByThinkingLevel": model_def.get(
+                            "samplingParamsByThinkingLevel"
+                        ),
                         "input": model_def.get("input") or ["text"],
                         "cost": cast(ModelCost, model_def.get("cost") or default_cost),
                         "contextWindow": model_def.get("contextWindow", 128000),
@@ -1005,6 +1023,10 @@ class ModelRegistry:
                         "baseUrl": model_def.get("baseUrl") or config.get("baseUrl", ""),
                         "reasoning": model_def.get("reasoning", False),
                         "thinkingLevelMap": model_def.get("thinkingLevelMap"),
+                        "samplingParams": model_def.get("samplingParams"),
+                        "samplingParamsByThinkingLevel": model_def.get(
+                            "samplingParamsByThinkingLevel"
+                        ),
                         "input": model_def.get("input", ["text"]),
                         "cost": model_def.get("cost"),
                         "contextWindow": model_def.get("contextWindow"),

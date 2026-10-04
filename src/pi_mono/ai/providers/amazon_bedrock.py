@@ -11,6 +11,7 @@ import botocore.config  # type: ignore[import-untyped]
 import botocore  # type: ignore[import-untyped]
 
 from pi_mono.ai.models import calculate_cost
+from pi_mono.ai.utils.callbacks import emit_provider_stream_event
 from pi_mono.ai.types import (
     AssistantMessage,
     Context,
@@ -251,6 +252,7 @@ def stream_bedrock(
                 event = await asyncio.to_thread(lambda: next(stream_iterator, None))
                 if event is None:
                     break
+                await emit_provider_stream_event(options_dict, event, model)
 
                 if "messageStart" in event:
                     if event["messageStart"].get("role") != "assistant":

@@ -152,6 +152,9 @@ class Agent:
         self.getApiKey: Callable[[str], Any] | None = opts.get("getApiKey")
         self.onPayload: Callable[[Any, Model], Any] | None = opts.get("onPayload")
         self.onResponse: Callable[[Any, Model], Any] | None = opts.get("onResponse")
+        self.onProviderStreamEvent: Callable[[Any, Model], Any] | None = opts.get(
+            "onProviderStreamEvent"
+        )
         self.beforeToolCall: Callable[[BeforeToolCallContext, AbortSignal | None], Any] | None = (
             opts.get("beforeToolCall")
         )
@@ -161,6 +164,8 @@ class Agent:
         self.prepareNextTurn: Callable[[AbortSignal | None], Any] | None = opts.get(
             "prepareNextTurn"
         )
+        self.prepareRequest: Callable[..., Any] | None = opts.get("prepareRequest")
+        self.finishTurn: Callable[..., Any] | None = opts.get("finishTurn")
 
         self.steeringQueue = PendingMessageQueue(opts.get("steeringMode") or "one-at-a-time")
         self.followUpQueue = PendingMessageQueue(opts.get("followUpMode") or "one-at-a-time")
@@ -231,6 +236,10 @@ class Agent:
             await self.active_run["future"]
 
     def reset(self) -> None:
+        if self.active_run:
+            raise RuntimeError(
+                "Agent is already processing. Wait for completion before resetting."
+            )
         self._state.messages = []
         self._state._is_streaming = False
         self._state._streaming_message = None
@@ -361,6 +370,8 @@ class Agent:
             config["onPayload"] = self.onPayload
         if self.onResponse is not None:
             config["onResponse"] = self.onResponse
+        if self.onProviderStreamEvent is not None:
+            config["onProviderStreamEvent"] = self.onProviderStreamEvent
         if self.thinkingBudgets is not None:
             config["thinkingBudgets"] = cast(dict[str, int], self.thinkingBudgets)
         if self.maxRetryDelayMs is not None:
@@ -384,6 +395,11 @@ class Agent:
                 return await maybe_await(prep_next(self.signal))
 
             config["prepareNextTurn"] = prepare
+
+        if self.prepareRequest is not None:
+            config["prepareRequest"] = self.prepareRequest
+        if self.finishTurn is not None:
+            config["finishTurn"] = self.finishTurn
 
         return config
 
