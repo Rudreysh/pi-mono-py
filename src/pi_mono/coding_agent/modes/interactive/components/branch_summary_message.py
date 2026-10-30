@@ -13,11 +13,15 @@ from pi_mono.tui.components.text import Text
 
 
 class BranchSummaryMessageComponent(Box):
-    def __init__(self, message: dict[str, Any]) -> None:
-        super().__init__(1, 1, theme.bg_fn("customMessageBg"))
+    def __init__(self, message: dict[str, Any], output_pad: int = 1) -> None:
+        super().__init__(output_pad, 1, theme.bg_fn("customMessageBg"))
         self._message = message
         self._expanded = False
         self._update_display()
+
+    def set_output_pad(self, padding: int) -> None:
+        self.padding_x = padding
+        self.invalidate()
 
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = expanded

@@ -28,7 +28,7 @@ KnownProvider = Literal[
     "google",
     "google-vertex",
     "openai",
-    "azure-openai-responses",
+    "azure",
     "openai-codex",
     "nvidia",
     "deepseek",
@@ -242,6 +242,7 @@ class AssistantMessage(TypedDict, total=False):
     stopReason: StopReason
     errorMessage: str
     timestamp: int  # Unix timestamp in milliseconds
+    durationMs: int
     providerThinkingLevel: str
     thinkingLevel: str
 
@@ -345,6 +346,7 @@ class ToolResultMessage(TypedDict, total=False):
     addedToolNames: list[str]
     isError: bool
     timestamp: int
+    durationMs: int
     usage: Usage
 
 

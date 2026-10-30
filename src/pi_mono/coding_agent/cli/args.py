@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pi_mono.agent.types import ThinkingLevel
+from pi_mono.coding_agent.cli.tool_flags import get_tool_list_error
 from pi_mono.config import APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR
 
 Mode = Literal["text", "json", "rpc"]
@@ -45,6 +46,7 @@ class Args:
     exclude_tools: list[str] | None = None
     no_tools: bool = False
     no_builtin_tools: bool = False
+    no_mcp: bool = False
     extensions: list[str] | None = None
     no_extensions: bool = False
     print_mode: bool = False
@@ -144,8 +146,15 @@ def parse_args(args: list[str]) -> Args:
         elif arg in ("--no-builtin-tools", "-nbt"):
             result.no_builtin_tools = True
         elif arg in ("--tools", "-t") and i + 1 < len(args):
-            result.tools = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+            tools = [s.strip() for s in args[i + 1].split(",") if s.strip()]
             i += 1
+            error = get_tool_list_error(tools)
+            if error:
+                result.diagnostics.append({"type": "error", "message": f"{arg}: {error}"})
+            else:
+                result.tools = tools
+        elif arg == "--no-mcp":
+            result.no_mcp = True
         elif arg in ("--exclude-tools", "-xt") and i + 1 < len(args):
             result.exclude_tools = [s.strip() for s in args[i + 1].split(",") if s.strip()]
             i += 1
@@ -318,8 +327,9 @@ Options:
   --models <patterns>            Comma-separated model patterns
   --no-tools, -nt                Disable all tools
   --no-builtin-tools, -nbt       Disable built-in tools only
-  --tools, -t <tools>            Comma-separated tool allowlist
-  --exclude-tools, -xt <tools>   Comma-separated tool denylist
+  --tools, -t <tools>            Tool names or * patterns. +name/-name edits the defaults
+  --exclude-tools, -xt <tools>   Tool names or * patterns to disable
+  --no-mcp                       Disable built-in MCP for this run
   --thinking <level>             Thinking level: off, minimal, low, medium, high, xhigh, max
   --list-models [search]         List available models
   --verbose                      Force verbose startup

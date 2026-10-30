@@ -18,7 +18,7 @@ from pi_mono.ai.utils.event_stream import AssistantMessageEventStream
 from pi_mono.ai.utils.headers import headers_to_record
 
 DEFAULT_AZURE_API_VERSION = "v1"
-AZURE_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode"}
+AZURE_TOOL_CALL_PROVIDERS = {"openai", "openai-codex", "opencode", "azure"}
 
 
 def _parse_deployment_name_map(value: str | None) -> dict[str, str]:
@@ -30,9 +30,10 @@ def _parse_deployment_name_map(value: str | None) -> dict[str, str]:
         entry = entry.strip()
         if not entry:
             continue
-        parts = entry.split("=", 1)
-        if len(parts) == 2:
-            result[parts[0].strip()] = parts[1].strip()
+        model_id, separator, deployment_name = entry.partition("=")
+        if not separator or not model_id.strip() or not deployment_name.strip():
+            continue
+        result[model_id.strip()] = deployment_name.strip()
     return result
 
 
@@ -42,7 +43,7 @@ def _resolve_deployment_name(model: dict[str, Any], options: dict[str, Any] | No
         return options["azureDeploymentName"]
 
     env_map = _parse_deployment_name_map(os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME_MAP"))
-    return env_map.get(model["id"], model["id"])
+    return env_map.get(model["id"]) or model["id"]
 
 
 def _format_azure_openai_error(error: Exception) -> str:
@@ -79,14 +80,18 @@ def _normalize_azure_base_url(base_url: str) -> str:
     """Normalize Azure base URL to ensure /openai/v1 path."""
     from urllib.parse import urlparse, urlunparse
 
-    parsed = urlparse(base_url.rstrip("/"))
-    is_azure_host = parsed.hostname and (
+    trimmed = base_url.strip().rstrip("/")
+    parsed = urlparse(trimmed)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError(f"Invalid Azure OpenAI base URL: {base_url}")
+    is_azure_host = (
         parsed.hostname.endswith(".openai.azure.com")
         or parsed.hostname.endswith(".cognitiveservices.azure.com")
+        or parsed.hostname.endswith(".ai.azure.com")
     )
     normalized_path = parsed.path.rstrip("/")
 
-    if is_azure_host and normalized_path in ("", "/", "/openai"):
+    if is_azure_host and normalized_path in ("", "/", "/openai", "/openai/v1/responses"):
         parsed = parsed._replace(path="/openai/v1", query="")
 
     return urlunparse(parsed).rstrip("/")
@@ -101,18 +106,17 @@ def _resolve_azure_config(
     options: dict[str, Any] | None,
 ) -> tuple[str, str]:
     """Resolve Azure base URL and API version."""
+    resolved = options or {}
     api_version = (
-        options.get("azureApiVersion")
+        resolved.get("azureApiVersion")
         or os.environ.get("AZURE_OPENAI_API_VERSION")
         or DEFAULT_AZURE_API_VERSION
     )
 
-    base_url = (
-        options.get("azureBaseUrl", "").strip()
-        or os.environ.get("AZURE_OPENAI_BASE_URL", "").strip()
-        or None
-    )
-    resource_name = options.get("azureResourceName") or os.environ.get("AZURE_OPENAI_RESOURCE_NAME")
+    raw_base_url = resolved.get("azureBaseUrl")
+    base_url = raw_base_url.strip() if isinstance(raw_base_url, str) else ""
+    base_url = base_url or os.environ.get("AZURE_OPENAI_BASE_URL", "").strip() or None
+    resource_name = resolved.get("azureResourceName") or os.environ.get("AZURE_OPENAI_RESOURCE_NAME")
 
     if not base_url and resource_name:
         base_url = _build_default_base_url(resource_name)
@@ -336,6 +340,97 @@ def stream_simple_azure_openai_responses(
     return stream_azure_openai_responses(
         model, context, {**base, "reasoningEffort": reasoning_effort}
     )
+
+
+def _prepare_azure_completions(
+    model: dict[str, Any],
+    options: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve the Azure endpoint and send the deployment name as the request model."""
+    resolved_options = dict(options or {})
+    base_url, _api_version = _resolve_azure_config(model, resolved_options)
+    resolved_model = {**model, "baseUrl": base_url, "provider": model.get("provider") or "azure"}
+    deployment_name = _resolve_deployment_name(model, resolved_options)
+    if deployment_name != model["id"]:
+        previous = resolved_options.get("onPayload")
+
+        async def _on_payload(
+            payload: dict[str, Any], payload_model: dict[str, Any]
+        ) -> dict[str, Any]:
+            params = {**payload, "model": deployment_name}
+            if previous is None:
+                return params
+            next_params = previous(params, payload_model)
+            if hasattr(next_params, "__await__"):
+                next_params = await next_params
+            return next_params if next_params is not None else params
+
+        resolved_options["onPayload"] = _on_payload
+    return resolved_model, resolved_options
+
+
+def _setup_error_stream(model: dict[str, Any], error: BaseException) -> AssistantMessageEventStream:
+    """Report endpoint setup failures on the stream, matching lazyStream."""
+    import asyncio
+
+    stream = AssistantMessageEventStream()
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": [],
+        "api": model.get("api", "openai-completions"),
+        "provider": model.get("provider", "azure"),
+        "model": model.get("id", ""),
+        "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+        },
+        "stopReason": "error",
+        "errorMessage": str(error),
+        "timestamp": stream._started_at - 1,
+    }
+
+    async def emit() -> None:
+        stream.push({"type": "error", "reason": "error", "error": message})
+        stream.end()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+    loop.create_task(emit())
+    return stream
+
+
+def stream_azure_openai_completions(
+    model: dict[str, Any],
+    context: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> AssistantMessageEventStream:
+    from pi_mono.ai.providers.openai_completions import stream_openai_completions
+
+    try:
+        resolved_model, resolved_options = _prepare_azure_completions(model, options)
+    except Exception as error:
+        return _setup_error_stream(model, error)
+    return stream_openai_completions(resolved_model, context, resolved_options)
+
+
+def stream_simple_azure_openai_completions(
+    model: dict[str, Any],
+    context: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> AssistantMessageEventStream:
+    from pi_mono.ai.providers.openai_completions import stream_simple_openai_completions
+
+    try:
+        resolved_model, resolved_options = _prepare_azure_completions(model, options)
+    except Exception as error:
+        return _setup_error_stream(model, error)
+    return stream_simple_openai_completions(resolved_model, context, resolved_options)
 
 
 streamAzureOpenAIResponses = stream_azure_openai_responses

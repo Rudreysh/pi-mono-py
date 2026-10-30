@@ -2,7 +2,7 @@ BUILT_IN_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "anthropic": "Anthropic",
     "amazon-bedrock": "Amazon Bedrock",
     "ant-ling": "Ant Ling",
-    "azure-openai-responses": "Azure OpenAI Responses",
+    "azure": "Azure",
     "cerebras": "Cerebras",
     "cloudflare-ai-gateway": "Cloudflare AI Gateway",
     "cloudflare-workers-ai": "Cloudflare Workers AI",

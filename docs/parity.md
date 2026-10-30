@@ -164,6 +164,27 @@ This document tracks behavioral parity between the TypeScript packages (`package
 | Python model catalog sync (`generate_models.py --check`) | **Match** (CI + release publish job) |
 | Real-provider e2e (`PI_E2E_PROVIDER`) | **Partial** | Gated pytest marker in `test_e2e_providers.py` |
 
+## v1.0.3–v1.0.4 ports
+
+The TypeScript tree is v1.0.4 plus unreleased commits. Durable itself is explained in [durable.md](durable.md). These rows are the coding-agent and pi-ai behavior ported from that range.
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Context estimate 3.5 characters per token | **Match** | `#10497` |
+| Retry `server_busy` and Bedrock canceled HTTP/2 streams | **Match** | `#10543`, `#10379` |
+| Mistral `finish_reason: error` retry | **Match** | Error text includes `server error` (`#10487`) |
+| `Home`/`End` stay in the editor | **Match** | Transcript top/bottom is `Ctrl+Home`/`Ctrl+End` (`#10314`) |
+| `--tools` `+name`/`-name` and `*` patterns | **Match** | Modifiers edit defaults; patterns filter names |
+| `--no-mcp` | **Partial** | Flag is parsed and MCP tool names are excluded. Python MCP is still stdio-only |
+| Azure provider id `azure` and Foundry Chat Completions | **Match** | Provider id `azure`; API stays `azure-openai-responses` or `openai-completions`. Deployment map and `.ai.azure.com` hosts |
+| `durationMs` on assistant and tool results | **Match** | Stamped on the event stream and executed tools. Bash `Took` uses the recorded time (`#10549`) |
+| `outputPad` on `!` output, tool output, and summaries | **Match** | Bash, tool cards, compaction, branch summary, and skill blocks |
+| Anthropic login falls back to a free port | **Match** | Preferred port 53692; bind failure uses port 0 (`#10571`) |
+| Hidden tools left out of the system prompt | **Match** | `prepareLoadout` sets `hiddenDeclarations` and description overrides (`#10343`). Hidden tools stay callable and are omitted from the prompt and the model tool list |
+| OAuth refresh persists a rotated token | **Match** | A cancel after refresh starts still waits for the credential write |
+| MCP OAuth cancel and timeouts | **Match** | Esc, session abort, and the 15s auth-server timeout cancel sign-in (`#10565`). An aborted refresh does not start a new authorization. Closing the HTTP session reuses the last token. Browser OAuth discovery stays unported; tool calls remain stdio JSON-RPC |
+| Durable harness, pi-env, codemode, classifiers | **Missing** | See [durable.md](durable.md)
+
 ## v0.86.0–v1.0.2 ports
 
 | Feature | Status | Notes |

@@ -101,6 +101,8 @@ class TsExtensionHost:
         await self._cleanup_process()
         env = os.environ.copy()
         repo_root = Path(__file__).resolve().parents[6]
+        if not (repo_root / "package.json").exists():
+            repo_root = repo_root / "pi-mono"
         if (repo_root / "package.json").exists():
             env.setdefault("PI_MONO_ROOT", str(repo_root))
 

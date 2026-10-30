@@ -40,6 +40,25 @@ After install, the `pi` and `pi-ai` console scripts are also available.
 | `pi_mono.core` | Shared core utilities |
 | `pi_mono.tui` | Terminal UI components |
 
+## Development Layout
+
+This checkout is the authoritative Python source. Develop and push Python
+directly here on `develop`. The sibling `../pi-mono` checkout contains the
+original TypeScript source on `main` and personal TypeScript work on
+`ts-custom`. See [the maintenance workflow](docs/workflow.md).
+
+Use the local development environment:
+
+```bash
+source .venv/bin/activate
+python -m pi_mono.coding_agent
+python -m pytest tests/test_standalone_layout.py
+```
+
+Catalog scripts accept `--typescript-root ../pi-mono` or `PI_MONO_ROOT` when
+the TypeScript checkout is elsewhere. The optional TypeScript extension bridge
+uses that same environment variable and the TypeScript checkout's Node dependencies.
+
 ## Tests
 
 ```bash
@@ -50,7 +69,8 @@ python3.11 -m pytest
 ## Upstream
 
 - Original project: [badlogic/pi-mono](https://github.com/badlogic/pi-mono)
-- Fork with Python port branch: [Rudreysh/pi-mono](https://github.com/Rudreysh/pi-mono) (`python-port`)
+- TypeScript fork: [Rudreysh/pi-mono](https://github.com/Rudreysh/pi-mono) (`main` mirrors upstream; `ts-custom` holds personal features)
+- Python development: [Rudreysh/pi-mono-py](https://github.com/Rudreysh/pi-mono-py) (`develop`)
 
 ## License
 

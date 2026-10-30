@@ -77,8 +77,8 @@ TUI_KEYBINDINGS: Dict[str, KeybindingDefinition] = {
         ["shift+enter", "ctrl+shift+g"], "Select the previous search match"
     ),
     "tui.altScreen.searchClose": KeybindingDefinition("escape", "Close transcript search"),
-    "tui.altScreen.top": KeybindingDefinition("home", "Scroll viewport to top"),
-    "tui.altScreen.bottom": KeybindingDefinition("end", "Scroll viewport to bottom"),
+    "tui.altScreen.top": KeybindingDefinition("ctrl+home", "Scroll viewport to top"),
+    "tui.altScreen.bottom": KeybindingDefinition("ctrl+end", "Scroll viewport to bottom"),
 }
 
 

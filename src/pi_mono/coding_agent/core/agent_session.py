@@ -50,7 +50,9 @@ from pi_mono.coding_agent.core.auth_guidance import (
 from pi_mono.coding_agent.core.resource_loader import ResourceLoader
 from pi_mono.coding_agent.core.prompt_templates import expand_prompt_template
 from pi_mono.coding_agent.core.skills import expand_skill_command
+from pi_mono.coding_agent.core.mcp.oauth import cancel_active_mcp_sign_ins
 from pi_mono.coding_agent.core.system_prompt import build_system_prompt
+from pi_mono.coding_agent.core.tool_loadout import apply_prepare_loadout
 from pi_mono.coding_agent.core.extensions import (
     ExtensionActions,
     ExtensionCommandContextActions,
@@ -70,6 +72,11 @@ from pi_mono.agent.types import (
     BeforeToolCallResult,
 )
 from pi_mono.coding_agent.core.extensions.wrapper import wrap_registered_tools
+from pi_mono.coding_agent.cli.tool_flags import (
+    allowlist_filters_mcp,
+    create_tool_name_matcher,
+    is_mcp_tool_name,
+)
 from pi_mono.coding_agent.core.tools import ALL_TOOL_NAMES, ToolName, create_tool
 from pi_mono.config import get_agent_dir
 from pi_mono.utils.paths import resolve_path  # used by AgentSessionRuntime
@@ -269,6 +276,7 @@ class AgentSessionConfig:
     system_prompt: str | None = None
     extension_paths: list[str] | None = None
     no_extensions: bool = False
+    no_mcp: bool = False
     extension_runner_ref: list[ExtensionRunner | None] | None = None
 
 
@@ -282,16 +290,27 @@ def _resolve_tools(
     initial_active_tool_names: list[str] | None = None,
     allowed_tool_names: list[str] | None = None,
     excluded_tool_names: list[str] | None = None,
+    no_mcp: bool = False,
 ) -> list[AgentTool]:
     if initial_active_tool_names is None:
         active = _default_active_tools()
     else:
         active = list(initial_active_tool_names)
-    if allowed_tool_names is not None:
-        active = [name for name in active if name in allowed_tool_names]
-    if excluded_tool_names:
-        active = [name for name in active if name not in excluded_tool_names]
-    return [create_tool(name, cwd) for name in active]  # type: ignore[arg-type]
+    allowed = create_tool_name_matcher(allowed_tool_names) if allowed_tool_names is not None else None
+    filters_mcp = allowlist_filters_mcp(allowed_tool_names) if allowed_tool_names is not None else False
+    excluded = create_tool_name_matcher(excluded_tool_names) if excluded_tool_names else None
+
+    def keep(name: str) -> bool:
+        if no_mcp and is_mcp_tool_name(name):
+            return False
+        if allowed is not None and not allowed(name):
+            if not (is_mcp_tool_name(name) and not filters_mcp):
+                return False
+        if excluded is not None and excluded(name):
+            return False
+        return name in ALL_TOOL_NAMES
+
+    return [create_tool(name, cwd) for name in active if keep(name)]  # type: ignore[arg-type]
 
 
 class AgentSession:
@@ -337,12 +356,27 @@ class AgentSession:
         self._extension_shutdown_handler: Callable[[], None] | None = None
         self._extension_abort_handler: Callable[[], None] | None = None
         self._agent_tool_hooks_installed = False
-        self._allowed_tool_names = (
-            set(config.allowed_tool_names) if config.allowed_tool_names is not None else None
+        self._no_mcp = config.no_mcp
+        self._allowed_matcher = (
+            create_tool_name_matcher(config.allowed_tool_names)
+            if config.allowed_tool_names is not None
+            else None
         )
-        self._excluded_tool_names = set(config.excluded_tool_names or [])
+        self._allowlist_filters_mcp = (
+            allowlist_filters_mcp(config.allowed_tool_names)
+            if config.allowed_tool_names is not None
+            else False
+        )
+        self._excluded_matcher = (
+            create_tool_name_matcher(config.excluded_tool_names)
+            if config.excluded_tool_names
+            else None
+        )
         self._tool_registry: dict[str, AgentTool] = {}
         self._tool_prompt_snippets: dict[str, str] = {}
+        self._tool_prompt_guidelines: dict[str, list[str]] = {}
+        self._tool_definitions: dict[str, Any] = {}
+        self._hidden_declarations: set[str] = set()
         self._is_agent_run_active = False
         self._idle_wait_future: asyncio.Future[None] | None = None
 
@@ -351,6 +385,7 @@ class AgentSession:
             initial_active_tool_names=config.initial_active_tool_names,
             allowed_tool_names=config.allowed_tool_names,
             excluded_tool_names=config.excluded_tool_names,
+            no_mcp=config.no_mcp,
         )
         self.agent.state.tools = tools
         for tool in tools:
@@ -392,9 +427,14 @@ class AgentSession:
         return [{"name": name} for name in sorted(self._tool_registry.keys())]
 
     def _is_allowed_tool(self, name: str) -> bool:
-        if self._allowed_tool_names is not None and name not in self._allowed_tool_names:
+        if self._no_mcp and is_mcp_tool_name(name):
             return False
-        return name not in self._excluded_tool_names
+        if self._allowed_matcher is not None and not self._allowed_matcher(name):
+            if not (is_mcp_tool_name(name) and not self._allowlist_filters_mcp):
+                return False
+        if self._excluded_matcher is not None and self._excluded_matcher(name):
+            return False
+        return True
 
     @property
     def messages(self) -> list[AgentMessage]:
@@ -614,14 +654,22 @@ class AgentSession:
         skills = loader.get_skills().get("skills", [])
         append_parts = loader.get_append_system_prompt()
         selected_tool_names = [tool.name for tool in self.agent.state.tools]
+        hidden_tool_names = sorted(self._hidden_declarations)
         tool_snippets = {
             name: snippet
             for name, snippet in self._tool_prompt_snippets.items()
-            if name in selected_tool_names
+            if name in selected_tool_names and name not in self._hidden_declarations
+        }
+        tool_guidelines = {
+            name: list(guidelines)
+            for name, guidelines in self._tool_prompt_guidelines.items()
+            if name in selected_tool_names and name not in self._hidden_declarations
         }
         prompt = build_system_prompt(
             custom_prompt=custom_prompt or loader.get_system_prompt(),
             selected_tools=selected_tool_names,
+            hidden_tools=hidden_tool_names,
+            tool_guidelines=tool_guidelines,
             tool_snippets=tool_snippets,
             append_system_prompt="\n\n".join(append_parts) if append_parts else None,
             cwd=self.cwd,
@@ -992,6 +1040,7 @@ class AgentSession:
         await self._get_idle_wait_future()
 
     async def abort(self) -> None:
+        cancel_active_mcp_sign_ins()
         self.abort_retry()
         self.abort_compaction()
         if self._branch_summary_abort_controller is not None:
@@ -1765,12 +1814,26 @@ class AgentSession:
             )
         )
 
+    def _report_prepare_loadout_error(self, tool_name: str, error: BaseException) -> None:
+        runner = self._extension_runner
+        if runner is None:
+            return
+        runner.emit_error(
+            ExtensionError(
+                extension_path="<runtime>",
+                event="prepare_loadout",
+                error=f"{tool_name}: {error}",
+            )
+        )
+
     def _refresh_tool_registry(self) -> None:
         previous_active = [tool.name for tool in self.agent.state.tools]
         previous_registry_names = set(self._tool_registry.keys())
 
         registry: dict[str, AgentTool] = {}
         snippets: dict[str, str] = dict(_DEFAULT_TOOL_SNIPPETS)
+        guidelines: dict[str, list[str]] = {}
+        definitions: dict[str, Any] = {}
 
         for name in ALL_TOOL_NAMES:
             if not self._is_allowed_tool(name):
@@ -1787,14 +1850,20 @@ class AgentSession:
             for wrapped in wrap_registered_tools(registered_tools, runner):
                 registry[wrapped.name] = wrapped
             for registered in registered_tools:
-                snippet = registered.definition.prompt_snippet
+                definition = registered.definition
+                definitions[definition.name] = definition
+                snippet = definition.prompt_snippet
                 if snippet:
-                    snippets[registered.definition.name] = snippet
+                    snippets[definition.name] = snippet
+                if definition.prompt_guidelines:
+                    guidelines[definition.name] = [
+                        item.strip() for item in definition.prompt_guidelines if item.strip()
+                    ]
 
         next_active = [name for name in previous_active if name in registry]
-        if self._allowed_tool_names is not None:
+        if self._allowed_matcher is not None:
             for name in registry:
-                if name in self._allowed_tool_names and name not in next_active:
+                if self._allowed_matcher(name) and name not in next_active:
                     next_active.append(name)
         else:
             extension_names: set[str] = set()
@@ -1812,7 +1881,18 @@ class AgentSession:
 
         self._tool_registry = registry
         self._tool_prompt_snippets = snippets
-        self.agent.state.tools = [registry[name] for name in next_active if name in registry]
+        self._tool_prompt_guidelines = guidelines
+        self._tool_definitions = definitions
+        active = [registry[name] for name in next_active if name in registry]
+        active, hidden = apply_prepare_loadout(
+            active,
+            definitions,
+            guidelines,
+            registered=list(registry.values()),
+            on_error=self._report_prepare_loadout_error,
+        )
+        self._hidden_declarations = hidden
+        self.agent.state.tools = active
         self._refresh_system_prompt()
 
     async def export_to_html(

@@ -329,6 +329,7 @@ async def stream_assistant_response(
                 "parameters": t.parameters,
             }
             for t in context.get("tools", [])
+            if not getattr(t, "hidden_declaration", False)
         ],
     }
 
@@ -762,7 +763,12 @@ async def execute_prepared_tool_call(
     tool_call = prepared["toolCall"]
     args = prepared["args"]
 
+    accepting_updates = True
+
     def update_callback(partial_result: AgentToolResult) -> None:
+        if not accepting_updates:
+            return
+
         async def emit_update() -> None:
             await maybe_await(
                 emit(
@@ -778,17 +784,27 @@ async def execute_prepared_tool_call(
 
         update_events.append(emit_update())
 
+    started = time.monotonic()
+
+    def elapsed() -> int:
+        return round((time.monotonic() - started) * 1000)
+
     try:
-        # Check if execute is async/sync
         exec_func = tool.execute
         result = await maybe_await(exec_func(tool_call["id"], args, signal, update_callback))
+        duration_ms = elapsed()
+        accepting_updates = False
         await asyncio.gather(*update_events)
-        return {"result": result, "isError": False}
+        is_error = isinstance(result, dict) and result.get("isError") is True
+        return {"result": result, "isError": is_error, "durationMs": duration_ms}
     except Exception as error:
+        duration_ms = elapsed()
+        accepting_updates = False
         await asyncio.gather(*update_events)
         return {
             "result": create_error_tool_result(str(error)),
             "isError": True,
+            "durationMs": duration_ms,
         }
 
 
@@ -829,11 +845,14 @@ async def finalize_executed_tool_call(
             result = create_error_tool_result(str(error))
             is_error = True
 
-    return {
+    finalized = {
         "toolCall": prepared["toolCall"],
         "result": result,
         "isError": is_error,
     }
+    if "durationMs" in executed:
+        finalized["durationMs"] = executed["durationMs"]
+    return finalized
 
 
 def create_error_tool_result(message: str, terminate: bool = False) -> AgentToolResult:
@@ -855,6 +874,11 @@ async def emit_tool_execution_end(finalized: dict, emit: AgentEventSink) -> None
                 "toolName": finalized["toolCall"]["name"],
                 "result": finalized["result"],
                 "isError": finalized["isError"],
+                **(
+                    {"durationMs": finalized["durationMs"]}
+                    if "durationMs" in finalized
+                    else {}
+                ),
             }
         )
     )
@@ -862,7 +886,7 @@ async def emit_tool_execution_end(finalized: dict, emit: AgentEventSink) -> None
 
 def create_tool_result_message(finalized: dict) -> ToolResultMessage:
     content = finalized["result"].get("content")
-    return {
+    message: ToolResultMessage = {
         "role": "toolResult",
         "toolCallId": finalized["toolCall"]["id"],
         "toolName": finalized["toolCall"]["name"],
@@ -873,6 +897,9 @@ def create_tool_result_message(finalized: dict) -> ToolResultMessage:
         "isError": finalized["isError"],
         "timestamp": int(time.time() * 1000),
     }
+    if "durationMs" in finalized:
+        message["durationMs"] = finalized["durationMs"]
+    return message
 
 
 async def emit_tool_result_message(

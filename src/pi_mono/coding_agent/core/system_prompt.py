@@ -9,11 +9,18 @@ from pi_mono.agent.harness.types import Skill
 from pi_mono.config import get_docs_path, get_examples_path, get_readme_path
 
 
-def _skill_file_read_tool(selected_tools: list[str] | None) -> str | None:
-    tools = selected_tools or ["read", "bash", "edit", "write"]
+def _skill_file_read_tool(
+    selected_tools: list[str] | None,
+    hidden_tools: list[str] | None = None,
+) -> str | None:
+    selected = selected_tools or ["read", "bash", "edit", "write"]
+    hidden = set(hidden_tools or [])
+    declared = [name for name in selected if name not in hidden]
     for name in ("read", "bash"):
-        if name in tools:
+        if name in declared:
             return name
+    if hidden and any(name in selected for name in ("read", "bash")):
+        return "indirect"
     return None
 
 
@@ -27,6 +34,8 @@ def build_system_prompt(
     cwd: str,
     context_files: list[dict[str, str]] | None = None,
     skills: list[Skill] | None = None,
+    hidden_tools: list[str] | None = None,
+    tool_guidelines: dict[str, list[str]] | None = None,
 ) -> str:
     prompt_cwd = cwd.replace("\\", "/")
     now = datetime.now()
@@ -34,6 +43,9 @@ def build_system_prompt(
     append_section = f"\n\n{append_system_prompt}" if append_system_prompt else ""
     resolved_context_files = context_files or []
     resolved_skills = skills or []
+    hidden = set(hidden_tools or [])
+    selected = selected_tools or ["read", "bash", "edit", "write"]
+    declared_tools = [name for name in selected if name not in hidden]
 
     if custom_prompt:
         prompt = custom_prompt
@@ -47,7 +59,7 @@ def build_system_prompt(
                     f"{file_entry['content']}\n</project_instructions>\n\n"
                 )
             prompt += "</project_context>\n"
-        custom_prompt_has_file_read = _skill_file_read_tool(selected_tools)
+        custom_prompt_has_file_read = _skill_file_read_tool(selected, hidden_tools)
         if custom_prompt_has_file_read and resolved_skills:
             prompt += format_skills_for_system_prompt(
                 resolved_skills, custom_prompt_has_file_read
@@ -60,7 +72,7 @@ def build_system_prompt(
     docs_path = get_docs_path()
     examples_path = get_examples_path()
 
-    tools = selected_tools or ["read", "bash", "edit", "write"]
+    tools = declared_tools
     visible_tools = [name for name in tools if tool_snippets and tool_snippets.get(name)]
     if visible_tools:
         tools_list = "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools)
@@ -82,12 +94,25 @@ def build_system_prompt(
     has_find = "find" in tools
     has_ls = "ls" in tools
 
-    if has_bash and not has_grep and not has_find and not has_ls:
-        add_guideline("Use bash for file operations like ls, rg, find")
+    if (has_bash or has_powershell) and not has_grep and not has_find and not has_ls:
+        if has_bash and has_powershell:
+            add_guideline(
+                "Use bash or PowerShell for file operations like listing, searching, and finding files"
+            )
+        elif has_powershell:
+            add_guideline("Use PowerShell for file operations like listing, searching, and finding files")
+        else:
+            add_guideline("Use bash for file operations like ls, rg, find")
     if has_powershell:
         add_guideline(
             "You can inspect PI_* environment variables for current model and session details."
         )
+
+    for name in tools:
+        for guideline in (tool_guidelines or {}).get(name, []):
+            normalized = guideline.strip()
+            if normalized:
+                add_guideline(normalized)
 
     for guideline in prompt_guidelines or []:
         normalized = guideline.strip()
@@ -130,7 +155,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
             )
         prompt += "</project_context>\n"
 
-    skill_file_read_tool = _skill_file_read_tool(tools)
+    skill_file_read_tool = _skill_file_read_tool(selected, hidden_tools)
     if skill_file_read_tool and resolved_skills:
         prompt += format_skills_for_system_prompt(resolved_skills, skill_file_read_tool)
 

@@ -50,6 +50,12 @@ def stream(
         resolved_options = _with_env_api_key(model, options)
         return stream_cursor(model, context, resolved_options)
 
+    if provider_name == "azure" and model.get("api") == "openai-completions":
+        from pi_mono.ai.providers.azure_openai_responses import stream_azure_openai_completions
+
+        resolved_options = _with_env_api_key(model, options)
+        return stream_azure_openai_completions(model, context, resolved_options)
+
     api = model.get("api", "")
     provider = _resolve_api_provider(api)
     resolved_options = _with_env_api_key(model, options)
@@ -78,6 +84,12 @@ def stream_simple(
 
         resolved_options = _with_env_api_key(model, options)
         return stream_simple_cursor(model, context, resolved_options)
+
+    if provider_name == "azure" and model.get("api") == "openai-completions":
+        from pi_mono.ai.providers.azure_openai_responses import stream_simple_azure_openai_completions
+
+        resolved_options = _with_env_api_key(model, options)
+        return stream_simple_azure_openai_completions(model, context, resolved_options)
 
     api = model.get("api", "")
     provider = _resolve_api_provider(api)

@@ -433,6 +433,7 @@ async def _create_runtime(parsed: Args, cwd: str, agent_dir: str, app_mode: str)
         resource_loader_options=resource_loader_options or None,
         extension_flag_values=parsed.unknown_flags or None,
         no_extensions=parsed.no_extensions,
+        no_mcp=parsed.no_mcp,
         settings_manager=settings_manager,
         auth_storage=auth_storage,
         model_registry=model_registry,

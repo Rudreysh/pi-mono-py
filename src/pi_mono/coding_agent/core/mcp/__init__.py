@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from pi_mono.coding_agent.core.mcp.oauth import cancel_active_mcp_sign_ins
+
 
 @dataclass
 class McpToolDefinition:
@@ -139,6 +141,7 @@ class McpManager:
         return client
 
     async def close(self) -> None:
+        cancel_active_mcp_sign_ins()
         for client in self._clients.values():
             await client.disconnect()
         self._clients.clear()

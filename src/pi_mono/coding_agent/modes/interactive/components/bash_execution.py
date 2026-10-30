@@ -17,6 +17,18 @@ from pi_mono.utils.ansi import strip_ansi
 PREVIEW_LINES = 20
 
 
+def format_duration(duration_ms: int) -> str:
+    seconds = duration_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    minutes = total_seconds // 60
+    remainder = total_seconds % 60
+    if minutes < 60:
+        return f"{minutes}m {remainder}s"
+    return f"{minutes // 60}h {minutes % 60}m {remainder}s"
+
+
 class BashExecutionComponent(Container):
     def __init__(
         self,
@@ -24,9 +36,11 @@ class BashExecutionComponent(Container):
         ui: TUI,
         *,
         exclude_from_context: bool = False,
+        output_pad: int = 1,
     ) -> None:
         super().__init__()
         self._command = command
+        self._output_pad = output_pad
         self._output_lines: list[str] = []
         self._status: str = "running"
         self._exit_code: int | None = None
@@ -65,6 +79,10 @@ class BashExecutionComponent(Container):
             self._output_lines.extend(new_lines)
         self._update_display()
 
+    def set_output_pad(self, padding: int) -> None:
+        self._output_pad = padding
+        self._update_display()
+
     def set_complete(
         self,
         exit_code: int | None,
@@ -84,8 +102,9 @@ class BashExecutionComponent(Container):
     def _update_display(self) -> None:
         self._content_container.clear()
         color_key = "dim" if self._exclude_from_context else "bashMode"
+        pad = self._output_pad
         self._content_container.add_child(
-            Text(theme.fg(color_key, theme.bold(f"$ {self._command}")), 1, 0)
+            Text(theme.fg(color_key, theme.bold(f"$ {self._command}")), pad, 0)
         )
         if self._status == "running":
             self._content_container.add_child(self._loader)
@@ -95,22 +114,22 @@ class BashExecutionComponent(Container):
             width = 80
             if self._expanded:
                 for line in output.splitlines():
-                    self._content_container.add_child(Text(theme.fg("toolOutput", line), 1, 0))
+                    self._content_container.add_child(Text(theme.fg("toolOutput", line), pad, 0))
             else:
-                truncated = truncate_to_visual_lines(output, PREVIEW_LINES, width, 1)
+                truncated = truncate_to_visual_lines(output, PREVIEW_LINES, width, pad)
                 for line in truncated.visual_lines:
-                    self._content_container.add_child(Text(theme.fg("toolOutput", line), 1, 0))
+                    self._content_container.add_child(Text(theme.fg("toolOutput", line), pad, 0))
                 if truncated.skipped_count:
                     self._content_container.add_child(
                         Text(
                             theme.fg("muted", f"... {truncated.skipped_count} lines hidden"),
-                            1,
+                            pad,
                             0,
                         )
                     )
         if self._status == "cancelled":
-            self._content_container.add_child(Text(theme.fg("warning", "Cancelled"), 1, 0))
+            self._content_container.add_child(Text(theme.fg("warning", "Cancelled"), pad, 0))
         elif self._status == "error":
             self._content_container.add_child(
-                Text(theme.fg("error", f"Exit code {self._exit_code}"), 1, 0)
+                Text(theme.fg("error", f"Exit code {self._exit_code}"), pad, 0)
             )

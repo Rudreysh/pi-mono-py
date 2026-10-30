@@ -1,5 +1,6 @@
 import json
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -7,8 +8,9 @@ from pi_mono.ai.utils.oauth.anthropic import login_anthropic, refresh_anthropic_
 
 
 class _FakeCallbackServer:
-    def __init__(self) -> None:
+    def __init__(self, redirect_uri: str) -> None:
         self.server = mock.Mock()
+        self.redirect_uri = redirect_uri
 
     def cancel_wait(self) -> None:
         pass
@@ -18,11 +20,12 @@ class _FakeCallbackServer:
 
 
 @pytest.mark.anyio
-async def test_keeps_localhost_redirect_uri_for_manual_callback_login():
+@pytest.mark.parametrize("port", [53692, 54321])
+async def test_keeps_localhost_redirect_uri_for_manual_callback_login(port):
     auth_url = {"value": ""}
 
     async def fake_start_callback_server(_expected_state: str):
-        return _FakeCallbackServer()
+        return _FakeCallbackServer(f"http://localhost:{port}/callback")
 
     with (
         mock.patch(
@@ -43,8 +46,6 @@ async def test_keeps_localhost_redirect_uri_for_manual_callback_login():
         )
 
         async def on_manual_code_input():
-            from urllib.parse import parse_qs, urlparse
-
             parsed = urlparse(auth_url["value"])
             params = parse_qs(parsed.query)
             state = params["state"][0]
@@ -65,7 +66,7 @@ async def test_keeps_localhost_redirect_uri_for_manual_callback_login():
     body = post_json.await_args.args[1]
     assert body["grant_type"] == "authorization_code"
     assert body["code"] == "manual-code"
-    assert body["redirect_uri"] == "http://localhost:53692/callback"
+    assert body["redirect_uri"] == f"http://localhost:{port}/callback"
 
 
 @pytest.mark.anyio

@@ -91,6 +91,16 @@ class _CallbackServerInfo:
         self.wait_for_code = wait_for_code
 
 
+def _open_callback_server(handler: type[BaseHTTPRequestHandler]) -> tuple[HTTPServer, str]:
+    """Bind the preferred loopback port, or any free port when it is taken."""
+    try:
+        return HTTPServer((CALLBACK_HOST, CALLBACK_PORT), handler), REDIRECT_URI
+    except OSError:
+        server = HTTPServer((CALLBACK_HOST, 0), handler)
+        port = int(server.server_address[1])
+        return server, f"http://localhost:{port}{CALLBACK_PATH}"
+
+
 async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
     import asyncio
 
@@ -156,13 +166,13 @@ async def _start_callback_server(expected_state: str) -> _CallbackServerInfo:
         def log_message(self, format: str, *args: Any) -> None:
             return
 
-    server = HTTPServer((CALLBACK_HOST, CALLBACK_PORT), Handler)
+    server, redirect_uri = _open_callback_server(Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     return _CallbackServerInfo(
         server=server,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=redirect_uri,
         cancel_wait=lambda: settle_wait(None),
         wait_for_code=lambda: result_future,
     )
@@ -238,11 +248,15 @@ async def login_anthropic(
     pkce = await generate_pkce()
     verifier = pkce["verifier"]
     challenge = pkce["challenge"]
-    server = await _start_callback_server(verifier)
+    server: _CallbackServerInfo | None
+    try:
+        server = await _start_callback_server(verifier)
+    except OSError:
+        server = None
+    redirect_uri = server.redirect_uri if server is not None else REDIRECT_URI
 
     code: str | None = None
     state: str | None = None
-    redirect_uri_for_exchange = REDIRECT_URI
 
     try:
         from urllib.parse import urlencode
@@ -252,7 +266,7 @@ async def login_anthropic(
                 "code": "true",
                 "client_id": CLIENT_ID,
                 "response_type": "code",
-                "redirect_uri": REDIRECT_URI,
+                "redirect_uri": redirect_uri,
                 "scope": SCOPES,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
@@ -282,10 +296,11 @@ async def login_anthropic(
                 except BaseException as err:
                     manual_error = err
                 finally:
-                    server.cancel_wait()
+                    if server is not None:
+                        server.cancel_wait()
 
             manual_task = asyncio.create_task(_run_manual())
-            result = await server.wait_for_code()
+            result = await server.wait_for_code() if server is not None else None
 
             if manual_error is not None:
                 raise manual_error
@@ -293,7 +308,6 @@ async def login_anthropic(
             if result and result.get("code"):
                 code = result["code"]
                 state = result["state"]
-                redirect_uri_for_exchange = REDIRECT_URI
             elif manual_input:
                 parsed = _parse_authorization_input(manual_input)
                 if parsed.get("state") and parsed["state"] != verifier:
@@ -313,17 +327,16 @@ async def login_anthropic(
                     code = parsed.get("code")
                     state = parsed.get("state") or verifier
         else:
-            result = await server.wait_for_code()
+            result = await server.wait_for_code() if server is not None else None
             if result and result.get("code"):
                 code = result["code"]
                 state = result["state"]
-                redirect_uri_for_exchange = REDIRECT_URI
 
         if not code:
             prompt_input = await on_prompt(
                 {
                     "message": "Paste the authorization code or full redirect URL:",
-                    "placeholder": REDIRECT_URI,
+                    "placeholder": redirect_uri,
                 }
             )
             parsed = _parse_authorization_input(prompt_input)
@@ -339,7 +352,7 @@ async def login_anthropic(
 
         if on_progress:
             on_progress("Exchanging authorization code for tokens...")
-        return await _exchange_authorization_code(code, state, verifier, redirect_uri_for_exchange)
+        return await _exchange_authorization_code(code, state, verifier, redirect_uri)
     finally:
         if manual_task is not None and not manual_task.done():
             manual_task.cancel()
@@ -347,7 +360,8 @@ async def login_anthropic(
                 await manual_task
             except asyncio.CancelledError:
                 pass
-        server.server.shutdown()
+        if server is not None:
+            server.server.shutdown()
 
 
 async def refresh_anthropic_token(refresh_token: str) -> OAuthCredentials:

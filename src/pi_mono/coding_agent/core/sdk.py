@@ -41,7 +41,13 @@ from pi_mono.coding_agent.core.resource_loader import (
 )
 from pi_mono.coding_agent.core.provider_attribution import merge_provider_attribution_headers
 from pi_mono.coding_agent.core.extensions.runner import ExtensionRunner
-from pi_mono.coding_agent.core.tools import ToolName
+from pi_mono.coding_agent.cli.tool_flags import (
+    DEFAULT_TOOL_NAMES,
+    apply_tool_modifiers,
+    create_tool_name_matcher,
+    get_tool_list_error,
+    is_tool_modifier,
+)
 from pi_mono.utils.paths import resolve_path
 
 
@@ -58,6 +64,7 @@ class CreateAgentSessionOptions:
     tools: list[str] | None = None
     exclude_tools: list[str] | None = None
     no_extensions: bool = False
+    no_mcp: bool = False
     resource_loader: ResourceLoader | None = None
     session_manager: SessionManager | None = None
     settings_manager: SettingsManager | None = None
@@ -81,6 +88,7 @@ class CreateAgentSessionFromServicesOptions:
     exclude_tools: list[str] | None = None
     no_tools: Literal["all", "builtin"] | None = None
     no_extensions: bool = False
+    no_mcp: bool = False
 
 
 def _convert_to_llm_with_block_images(
@@ -202,27 +210,41 @@ async def create_agent_session(
     else:
         thinking_level = clamp_thinking_level(model, thinking_level)  # type: ignore[assignment]
 
-    default_active_tool_names: list[ToolName] = ["read", "bash", "edit", "write"]
+    default_active_tool_names: list[str] = list(DEFAULT_TOOL_NAMES)
+    if opts.tools:
+        tool_list_error = get_tool_list_error(opts.tools)
+        if tool_list_error:
+            raise ValueError(f"Invalid tools option: {tool_list_error}")
     configured_default_tool_names = settings_manager.get_default_tools()
-    if opts.tools is not None:
+    default_tool_names = [] if opts.no_tools else (
+        configured_default_tool_names or default_active_tool_names
+    )
+    tool_modifiers = (
+        opts.tools if opts.tools and any(is_tool_modifier(entry) for entry in opts.tools) else None
+    )
+    selected_tool_names = (
+        apply_tool_modifiers(list(default_tool_names), tool_modifiers)
+        if tool_modifiers
+        else opts.tools
+    )
+    if tool_modifiers:
+        allowed_tool_names = selected_tool_names if opts.no_tools == "all" else None
+    elif opts.tools is not None:
         allowed_tool_names = opts.tools
     elif opts.no_tools == "all":
         allowed_tool_names = []
     else:
         allowed_tool_names = None
     excluded_tool_names = opts.exclude_tools
-    excluded_tool_name_set = set(excluded_tool_names or [])
-    if opts.tools is not None:
-        initial_active_tool_names = [
-            name for name in opts.tools if name not in excluded_tool_name_set
-        ]
-    elif opts.no_tools:
-        initial_active_tool_names = []
-    else:
-        builtin_defaults = configured_default_tool_names or default_active_tool_names
-        initial_active_tool_names = [
-            name for name in builtin_defaults if name not in excluded_tool_name_set
-        ]
+    is_excluded_tool = (
+        create_tool_name_matcher(excluded_tool_names) if excluded_tool_names else None
+    )
+    initial_source = selected_tool_names if selected_tool_names is not None else default_tool_names
+    if opts.no_tools and not tool_modifiers and opts.tools is None:
+        initial_source = []
+    initial_active_tool_names = [
+        name for name in initial_source if is_excluded_tool is None or not is_excluded_tool(name)
+    ]
 
     async def stream_fn(
         selected_model: Model[Any],
@@ -378,6 +400,7 @@ async def create_agent_session(
             allowed_tool_names=allowed_tool_names,
             excluded_tool_names=excluded_tool_names,
             no_extensions=opts.no_extensions,
+            no_mcp=opts.no_mcp,
             extension_runner_ref=extension_runner_ref,
         )
     )
@@ -413,6 +436,7 @@ async def create_agent_session_from_services(
             exclude_tools=options.exclude_tools,
             no_tools=options.no_tools,
             no_extensions=options.no_extensions,
+            no_mcp=options.no_mcp,
         )
     )
 
@@ -431,6 +455,7 @@ async def create_agent_session_runtime(
     resource_loader_options: dict[str, Any] | None = None,
     extension_flag_values: dict[str, bool | str] | None = None,
     no_extensions: bool = False,
+    no_mcp: bool = False,
     settings_manager: SettingsManager | None = None,
     auth_storage: AuthStorage | None = None,
     model_registry: ModelRegistry | None = None,
@@ -460,6 +485,7 @@ async def create_agent_session_runtime(
             exclude_tools=exclude_tools,
             no_tools=no_tools,
             no_extensions=no_extensions,
+            no_mcp=no_mcp,
         )
     )
     await result.session.bind_extensions()
@@ -498,6 +524,7 @@ async def create_agent_session_runtime(
                 exclude_tools=exclude_tools,
                 no_tools=no_tools,
                 no_extensions=no_extensions,
+                no_mcp=no_mcp,
             )
         )
         next_session = next_result.session

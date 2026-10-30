@@ -190,6 +190,7 @@ class ToolDefinition:
     execute: Callable[..., Awaitable[AgentToolResult[Any]]]
     prompt_snippet: str | None = None
     prompt_guidelines: list[str] | None = None
+    prepare_loadout: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None
 
 
 @dataclass

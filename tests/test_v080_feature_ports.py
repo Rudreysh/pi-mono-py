@@ -105,7 +105,7 @@ def test_estimate_context_tokens_ignores_stale_assistant_usage():
     estimate = estimate_context_tokens(context)
     assert estimate.last_usage_index is None
     assert estimate.usage_tokens == 0
-    assert estimate.tokens == 1005
+    assert estimate.tokens == 1149
 
     model: Model = {
         "id": "test-model",
@@ -120,7 +120,7 @@ def test_estimate_context_tokens_ignores_stale_assistant_usage():
         "maxTokens": 8_000,
     }
     options = build_base_options(model, context)
-    assert options["maxTokens"] == 4899
+    assert options["maxTokens"] == 4755
 
 
 def test_null_message_content_normalized_in_session_context():

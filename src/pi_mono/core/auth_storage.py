@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import json
@@ -395,7 +396,11 @@ class AuthStorage:
                 if isinstance(v, dict) and v.get("type") == "oauth":
                     oauth_creds[k] = cast(OAuthCredentials, v)
 
-            refreshed = await get_oauth_api_key(provider_id, oauth_creds)
+            refresh_started.set()
+            refreshed = await asyncio.wait_for(
+                get_oauth_api_key(provider_id, oauth_creds),
+                timeout=15,
+            )
             if not refreshed:
                 return {"result": None}
 
@@ -404,7 +409,26 @@ class AuthStorage:
             self.load_error = None
             return {"result": refreshed, "next": json.dumps(merged, indent=2)}
 
-        return await self.storage.with_lock_async(lock_fn)
+        # Cancellation stops waiting for the lock. Once the refresh HTTP call
+        # has started, the provider may have rotated the token, so the write
+        # finishes even if this caller is cancelled.
+        refresh_started = asyncio.Event()
+        refresh_task = asyncio.create_task(self.storage.with_lock_async(lock_fn))
+        try:
+            return await asyncio.shield(refresh_task)
+        except asyncio.CancelledError:
+            if refresh_started.is_set():
+                try:
+                    await refresh_task
+                except Exception:
+                    pass
+            else:
+                refresh_task.cancel()
+                try:
+                    await refresh_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
 
     async def get_api_key(
         self, provider_id: str, options: Optional[Dict[str, Any]] = None

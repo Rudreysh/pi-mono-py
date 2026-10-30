@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,7 +17,11 @@ _CATALOGS: tuple[tuple[str, str], ...] = (
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    configured = os.environ.get("PI_MONO_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    parent = Path(__file__).resolve().parents[2]
+    return parent if (parent / "packages" / "ai").is_dir() else parent / "pi-mono"
 
 
 def _node_executable(root: Path) -> str:
@@ -27,7 +32,7 @@ def _node_executable(root: Path) -> str:
 
 
 def export_ts_catalog(ts_path: Path, export_name: str) -> bytes:
-    root = _repo_root()
+    root = ts_path.resolve().parents[3]
     node = _node_executable(root)
     script = (
         f'import {{ {export_name} }} from "{ts_path.as_posix()}"; '
@@ -78,12 +83,19 @@ def read_catalog_bytes(source: Path, export_name: str | None) -> bytes:
     return export_ts_catalog(source, export_name)
 
 
-def sync_models(*, check: bool = False) -> int:
-    root = _repo_root()
+def sync_models(
+    *, check: bool = False, typescript_root: Path | None = None, python_root: Path | None = None
+) -> int:
+    root = typescript_root or _repo_root()
+    target = python_root or (
+        root / "python"
+        if (root / "python" / "src").is_dir()
+        else Path(__file__).resolve().parents[1]
+    )
     changed = False
     for stem, export_name in _CATALOGS:
         source, ts_export = resolve_catalog_source(stem, export_name, root=root)
-        destination = root / "python" / "src" / "pi_mono" / "ai" / f"{stem}.json"
+        destination = target / "src" / "pi_mono" / "ai" / f"{stem}.json"
         source_bytes = read_catalog_bytes(source, ts_export)
         if destination.is_file() and destination.read_bytes() == source_bytes:
             continue
@@ -103,12 +115,17 @@ def sync_models(*, check: bool = False) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--typescript-root",
+        type=Path,
+        help="TypeScript checkout (defaults to PI_MONO_ROOT or sibling pi-mono).",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Exit 1 if Python catalogs differ from the TypeScript sources.",
     )
     args = parser.parse_args()
-    raise SystemExit(sync_models(check=args.check))
+    raise SystemExit(sync_models(check=args.check, typescript_root=args.typescript_root))
 
 
 if __name__ == "__main__":

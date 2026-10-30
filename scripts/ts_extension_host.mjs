@@ -4,7 +4,6 @@
  * Used by the Python coding agent to load and execute .ts/.js extensions via jiti.
  */
 
-import { createJiti } from "jiti";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
@@ -67,7 +66,7 @@ function workspaceSourceAliases(repoRoot) {
 }
 
 function buildAliases(repoRoot) {
-	const require = createRequire(import.meta.url);
+	const require = createRequire(path.join(repoRoot, "package.json"));
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
 	const typeboxValueEntry = require.resolve("typebox/value");
@@ -91,6 +90,9 @@ function buildAliases(repoRoot) {
 }
 
 const repoRoot = findRepoRoot(path.join(__dirname, "..", ".."));
+
+const requireFromRepo = createRequire(path.join(repoRoot, "package.json"));
+const { createJiti } = requireFromRepo("jiti");
 const jiti = createJiti(import.meta.url, {
 	alias: buildAliases(repoRoot),
 });

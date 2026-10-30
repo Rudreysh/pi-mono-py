@@ -17,11 +17,14 @@ def format_skills_for_system_prompt(
     if not visible_skills:
         return ""
 
-    read_instruction = (
-        "Use the read tool to load a skill's file when the task matches its description."
-        if file_read_tool == "read"
-        else "Use bash to load a skill's file when the task matches its description."
-    )
+    if file_read_tool == "read":
+        read_instruction = (
+            "Use the read tool to load a skill's file when the task matches its description."
+        )
+    elif file_read_tool == "indirect":
+        read_instruction = "Load a skill's file when the task matches its description."
+    else:
+        read_instruction = "Use bash to load a skill's file when the task matches its description."
     lines = [
         "\n\nThe following skills provide specialized instructions for specific tasks.",
         read_instruction,

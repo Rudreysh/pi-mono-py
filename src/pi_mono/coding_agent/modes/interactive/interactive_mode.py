@@ -547,6 +547,7 @@ class InteractiveMode:
             ui=self._ui,
             cwd=self._get_cwd(),
             show_images=self._session.settings_manager.get_show_images(),
+            output_pad=self._output_pad,
         )
         self._track_expandable(component)
         return component
@@ -935,9 +936,10 @@ class InteractiveMode:
             return
         result = event.get("result")
         if isinstance(result, dict):
-            component.update_result(
-                {**result, "isError": bool(event.get("isError"))}, is_partial=False
-            )
+            shown = {**result, "isError": bool(event.get("isError"))}
+            if event.get("durationMs") is not None:
+                shown["durationMs"] = event["durationMs"]
+            component.update_result(shown, is_partial=False)
         self._pending_tools.pop(tool_call_id, None)
 
     def _append_user_message(self, message: AgentMessage | dict[str, Any]) -> None:
@@ -958,6 +960,7 @@ class InteractiveMode:
                 str(message.get("command", "")),
                 self._ui,
                 exclude_from_context=bool(message.get("excludeFromContext")),
+                output_pad=self._output_pad,
             )
             output = message.get("output")
             if isinstance(output, str) and output:
@@ -971,13 +974,13 @@ class InteractiveMode:
             return
         if role == "compactionSummary":
             self._chat_container.add_child(Spacer(1))
-            component = CompactionSummaryMessageComponent(message)
+            component = CompactionSummaryMessageComponent(message, output_pad=self._output_pad)
             self._track_expandable(component)
             self._chat_container.add_child(component)
             return
         if role == "branchSummary":
             self._chat_container.add_child(Spacer(1))
-            component = BranchSummaryMessageComponent(message)
+            component = BranchSummaryMessageComponent(message, output_pad=self._output_pad)
             self._track_expandable(component)
             self._chat_container.add_child(component)
             return
@@ -989,7 +992,9 @@ class InteractiveMode:
                 self._chat_container.add_child(Spacer(1))
             skill_block = parse_skill_block(text_content)
             if skill_block:
-                skill_component = SkillInvocationMessageComponent(skill_block)
+                skill_component = SkillInvocationMessageComponent(
+                    skill_block, output_pad=self._output_pad
+                )
                 self._track_expandable(skill_component)
                 self._chat_container.add_child(skill_component)
                 user_message = skill_block.get("userMessage")
@@ -2789,7 +2794,10 @@ class InteractiveMode:
         if event_result and event_result.get("result") is not None:
             result = event_result["result"]
             component = BashExecutionComponent(
-                command, self._ui, exclude_from_context=exclude_from_context
+                command,
+                self._ui,
+                exclude_from_context=exclude_from_context,
+                output_pad=self._output_pad,
             )
             self._track_expandable(component)
             self._chat_container.add_child(component)
@@ -2804,7 +2812,7 @@ class InteractiveMode:
             return
 
         component = BashExecutionComponent(
-            command, self._ui, exclude_from_context=exclude_from_context
+            command, self._ui, exclude_from_context=exclude_from_context, output_pad=self._output_pad
         )
         self._track_expandable(component)
         self._bash_component = component

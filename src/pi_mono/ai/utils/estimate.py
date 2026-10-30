@@ -8,7 +8,7 @@ from typing import Any
 
 from pi_mono.ai.types import Context, Message, Usage
 
-CHARS_PER_TOKEN = 4
+CHARS_PER_TOKEN = 3.5
 ESTIMATED_IMAGE_CHARS = 4800
 
 

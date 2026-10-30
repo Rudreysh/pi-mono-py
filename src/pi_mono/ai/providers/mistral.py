@@ -532,7 +532,12 @@ async def consume_chat_stream(
         choice = choices[0]
 
         finish_reason = safe_get(choice, "finish_reason")
-        if finish_reason:
+        if finish_reason == "error":
+            # Mistral reports transient server failures this way. "server error"
+            # makes the assistant message retryable.
+            output_dict["stopReason"] = "error"
+            output_dict["errorMessage"] = "Provider stopped with: error (server error)"
+        elif finish_reason:
             output_dict["stopReason"] = map_chat_stop_reason(finish_reason)
 
         delta = safe_get(choice, "delta")

@@ -19,11 +19,15 @@ class ParsedSkillBlock(TypedDict):
 
 
 class SkillInvocationMessageComponent(Box):
-    def __init__(self, skill_block: ParsedSkillBlock) -> None:
-        super().__init__(1, 1, theme.bg_fn("customMessageBg"))
+    def __init__(self, skill_block: ParsedSkillBlock, output_pad: int = 1) -> None:
+        super().__init__(output_pad, 1, theme.bg_fn("customMessageBg"))
         self._skill_block = skill_block
         self._expanded = False
         self._update_display()
+
+    def set_output_pad(self, padding: int) -> None:
+        self.padding_x = padding
+        self.invalidate()
 
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = expanded

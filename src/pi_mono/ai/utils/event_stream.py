@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from typing import Callable, Generic, TypeVar
 
@@ -77,10 +78,32 @@ class EventStream(Generic[T, R]):
 
 class AssistantMessageEventStream(EventStream[AssistantMessageEvent, AssistantMessage]):
     def __init__(self) -> None:
+        self._started_at = int(time.time() * 1000)
+        self._started_monotonic = time.monotonic()
         super().__init__(
             lambda event: event["type"] in ("done", "error"),
             self._extract_result,
         )
+
+    def push(self, event: AssistantMessageEvent) -> None:
+        if event["type"] == "done":
+            self._time(event["message"])
+        elif event["type"] == "error":
+            self._time(event["error"])  # type: ignore[typeddict-item]
+        super().push(event)
+
+    def end(self, result: AssistantMessage | None = None) -> None:
+        if result is not None:
+            self._time(result)
+        super().end(result)
+
+    def _time(self, message: AssistantMessage) -> None:
+        if self._done or message.get("durationMs") is not None:
+            return
+        timestamp = message.get("timestamp")
+        if isinstance(timestamp, (int, float)) and timestamp < self._started_at:
+            return
+        message["durationMs"] = max(0, round((time.monotonic() - self._started_monotonic) * 1000))
 
     def _extract_result(self, event: AssistantMessageEvent) -> AssistantMessage:
         if event["type"] == "done":

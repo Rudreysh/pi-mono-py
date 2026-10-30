@@ -20,7 +20,8 @@ _NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = re.compile(
 )
 
 _RETRYABLE_PROVIDER_ERROR_PATTERN = re.compile(
-    r"overloaded|currently experiencing high demand|model is at capacity|"
+    r"overloaded|server_busy|servers are currently busy|"
+    r"currently experiencing high demand|model is at capacity|"
     r"rate.?limit|too many requests|429|500|502|503|504|520|524|"
     r"service.?unavailable|server.?error|internal.?error|"
     r"provider.?returned.?error|exceeded request buffer limit while retrying upstream|"
@@ -33,6 +34,7 @@ _RETRYABLE_PROVIDER_ERROR_PATTERN = re.compile(
     r"ended without|stream ended before message_stop|"
     r"stream ended before a terminal response event|"
     r"http2 request did not get a response|"
+    r"pending stream has been canceled|"
     r"retry delay|"
     r"you can retry your request|try your request again|please retry your request|"
     r"ResourceExhausted|"
